@@ -6,7 +6,7 @@ Thanks for helping. Iron-Proxy is small on purpose; the best contributions keep 
 
 ```bash
 pnpm install
-pnpm check          # typecheck + lint + test + build, all packages
+pnpm check          # build + typecheck + lint + test, all packages (build first: dependents typecheck against core's dist)
 pnpm -F @iron-proxy/core test
 ```
 

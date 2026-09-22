@@ -3,9 +3,16 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [],
-  "linked": [["@iron-proxy/*", "iron-proxy"]],
+  "linked": [
+    [
+      "@iron-proxy/*",
+      "iron-proxy"
+    ]
+  ],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["iron-proxy-monorepo", "@iron-proxy/example-electron-host"]
+  "ignore": [
+    "@iron-proxy/example-electron-host"
+  ]
 }
