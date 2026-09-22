@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+!.env.example
+# runtime data created by local runs / examples
+.iron-proxy/
+examples/**/out/
+packages/react/src/styles.generated.ts

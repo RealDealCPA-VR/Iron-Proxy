@@ -1,0 +1,53 @@
+{
+  "name": "iron-proxy",
+  "version": "0.1.0",
+  "description": "Command line for Iron-Proxy: run the local account-switching proxy, add and log in AI provider accounts, check status, chat.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "iron-proxy": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^",
+    "@iron-proxy/proxy": "workspace:^"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "proxy",
+    "anthropic",
+    "openai",
+    "gemini",
+    "grok",
+    "failover",
+    "subscription"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

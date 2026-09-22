@@ -1,0 +1,41 @@
+{
+  "name": "iron-proxy-monorepo",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Bring-your-own-subscription account switching for AI providers. Titled accounts, ordered failover, automatic return. Library, local proxy, Electron bridge, React switcher.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git"
+  },
+  "homepage": "https://github.com/RealDealCPA-VR/Iron-Proxy#readme",
+  "bugs": "https://github.com/RealDealCPA-VR/Iron-Proxy/issues",
+  "packageManager": "pnpm@10.12.4",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' run build",
+    "typecheck": "pnpm -r --filter './packages/*' run typecheck",
+    "test": "pnpm -r --filter './packages/*' run test",
+    "test:coverage": "pnpm -r --filter './packages/*' run test -- --coverage",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "changeset": "changeset",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.12",
+    "@eslint/js": "^9.20.0",
+    "@types/node": "^22.13.1",
+    "eslint": "^9.20.0",
+    "prettier": "^3.5.0",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.0",
+    "vitest": "^3.0.5"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "dist",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@iron-proxy/core": ["../core/src/index.ts"],
+      "@iron-proxy/proxy": ["../proxy/src/index.ts"]
+    }
+  },
+  "include": ["src", "test"]
+}

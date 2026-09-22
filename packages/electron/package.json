@@ -1,0 +1,72 @@
+{
+  "name": "@iron-proxy/electron",
+  "version": "0.1.0",
+  "description": "Electron integration for Iron-Proxy: safeStorage-protected vault key, one IPC dispatcher for the main process, a preload bridge exposing window.ironProxy, and a helper that opens a vendor CLI login in a terminal window.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/main.cjs",
+  "module": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js",
+      "require": "./dist/main.cjs"
+    },
+    "./preload": {
+      "types": "./dist/preload.d.ts",
+      "import": "./dist/preload.js",
+      "require": "./dist/preload.cjs"
+    },
+    "./renderer": {
+      "types": "./dist/renderer.d.ts",
+      "import": "./dist/renderer.js",
+      "require": "./dist/renderer.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^"
+  },
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "keywords": [
+    "electron",
+    "ipc",
+    "preload",
+    "safeStorage",
+    "ai",
+    "anthropic",
+    "openai",
+    "gemini",
+    "grok",
+    "failover",
+    "subscription"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git",
+    "directory": "packages/electron"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

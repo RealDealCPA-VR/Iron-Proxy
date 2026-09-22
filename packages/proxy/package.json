@@ -1,0 +1,53 @@
+{
+  "name": "@iron-proxy/proxy",
+  "version": "0.1.0",
+  "description": "Localhost proxy for Iron-Proxy: OpenAI- and Anthropic-compatible endpoints with account failover, plus a control API and an HTTP client. Zero runtime dependencies beyond @iron-proxy/core.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "require": "./dist/client.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^"
+  },
+  "keywords": [
+    "ai",
+    "proxy",
+    "openai-compatible",
+    "anthropic-compatible",
+    "failover",
+    "rate-limit",
+    "localhost",
+    "electron"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git",
+    "directory": "packages/proxy"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

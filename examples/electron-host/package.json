@@ -1,0 +1,28 @@
+{
+  "name": "@iron-proxy/example-electron-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The smallest Electron app that wires Iron-Proxy end to end: safeStorage vault, IPC bridge, the React account switcher, and a chat box that shows which account served.",
+  "license": "MIT",
+  "type": "module",
+  "main": "out/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node scripts/build.mjs && electron .",
+    "test": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^",
+    "@iron-proxy/electron": "workspace:^",
+    "@iron-proxy/react": "workspace:^",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "electron": "^33.0.0",
+    "esbuild": "^0.25.0"
+  }
+}

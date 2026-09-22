@@ -1,0 +1,66 @@
+{
+  "name": "@iron-proxy/react",
+  "version": "0.1.0",
+  "description": "Styled drop-in account switcher and hooks for Iron-Proxy: titled accounts per AI provider, ordered failover, parked countdowns, click-and-continue login.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": [
+    "*.css"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "styles": "node scripts/build-styles.mjs",
+    "build": "node scripts/build-styles.mjs && tsup && node scripts/build-styles.mjs --copy",
+    "typecheck": "node scripts/build-styles.mjs && tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/build-styles.mjs && vitest run"
+  },
+  "keywords": [
+    "react",
+    "ai",
+    "anthropic",
+    "openai",
+    "gemini",
+    "grok",
+    "account-switcher",
+    "failover",
+    "electron",
+    "iron-proxy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git",
+    "directory": "packages/react"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.2.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "jsdom": "^26.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
