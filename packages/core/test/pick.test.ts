@@ -12,6 +12,7 @@ import {
   MemoryVault,
   NoProfileError,
   which,
+  candidateExtensions,
   type IronEvent,
   type IronProxy,
   type LaneKind,
@@ -187,5 +188,42 @@ describe.runIf(process.platform === 'win32')('which on Windows', () => {
     } finally {
       process.env.PATH = saved;
     }
+  });
+
+  it('finds my.tool.cmd for a dotted bare name whose dot is not a PATHEXT extension', async () => {
+    const bin = join(dir, 'bin-dotted');
+    await mkdir(bin);
+    await writeFile(join(bin, 'my.tool.cmd'), '@echo off\r\n');
+    const saved = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      expect((await which('my.tool'))?.toLowerCase()).toBe(join(bin, 'my.tool.cmd').toLowerCase());
+      expect((await which('MY.TOOL.CMD'))?.toLowerCase()).toBe(
+        join(bin, 'my.tool.cmd').toLowerCase(),
+      );
+    } finally {
+      process.env.PATH = saved;
+    }
+  });
+});
+
+describe('candidateExtensions (the which() extension decision, on every OS)', () => {
+  const PATHEXT = '.COM;.EXE;.BAT;.CMD';
+  it('tries PATHEXT for a bare or dotted name, and nothing for a real extension', () => {
+    const all = ['.com', '.exe', '.bat', '.cmd'];
+    expect(candidateExtensions('claude', 'win32', PATHEXT)).toEqual(all);
+    expect(candidateExtensions('my.tool', 'win32', PATHEXT)).toEqual(all);
+    expect(candidateExtensions('node-v1.2', 'win32', PATHEXT)).toEqual(all);
+    expect(candidateExtensions('claude.cmd', 'win32', PATHEXT)).toEqual(['']);
+    expect(candidateExtensions('claude.EXE', 'win32', PATHEXT)).toEqual(['']);
+    expect(candidateExtensions('my.tool.Cmd', 'win32', PATHEXT)).toEqual(['']);
+    // A directory's dot is not the name's extension; a custom PATHEXT is honoured.
+    expect(candidateExtensions('C:\\a.b\\tool', 'win32', PATHEXT)).toEqual(all);
+    expect(candidateExtensions('tool.ps1', 'win32', '.PS1;.EXE')).toEqual(['']);
+    expect(candidateExtensions('tool.cmd', 'win32', '.PS1;.EXE')).toEqual(['.ps1', '.exe']);
+    // Unset PATHEXT falls back to the Windows default; other platforms take the name as-is.
+    expect(candidateExtensions('my.tool', 'win32', undefined)).toEqual(all);
+    expect(candidateExtensions('my.tool', 'linux', PATHEXT)).toEqual(['']);
+    expect(candidateExtensions('claude', 'darwin', undefined)).toEqual(['']);
   });
 });

@@ -129,7 +129,7 @@ describe('error bodies carry the hint', () => {
     });
     const ab = (await anthropic.json()) as { type: string; iron: { hint: string } };
     expect(ab.type).toBe('error');
-    expect(ab.iron.hint).toContain('Add a anthropic account');
+    expect(ab.iron.hint).toContain('Add an account for anthropic:');
 
     const json = await fetch(`${h.url}/iron/profiles/missing/activate`, {
       method: 'POST',

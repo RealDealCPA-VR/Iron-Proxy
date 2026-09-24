@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,6 +101,33 @@ describe('profiles discover / adopt', () => {
   });
 });
 
+describe('profiles adopt <provider> without --home', () => {
+  it("looks only at that provider's default home and runs no other vendor CLI", async () => {
+    const a = io();
+    expect(await runCli(['profiles', 'adopt', 'anthropic'], a.io)).toBe(0);
+    expect((await iron.listProfiles())[0]?.cli).toEqual({
+      home: resolve(user, '.claude'),
+      adopted: true,
+    });
+    // The fake CLI records every run in the home it was given: codex was never started.
+    await expect(stat(join(user, '.codex', 'last-invocation.json'))).rejects.toThrow();
+  });
+
+  it("fails clearly when that provider's default home does not exist", async () => {
+    const r = io();
+    expect(await runCli(['profiles', 'adopt', 'xai'], r.io)).toBe(1);
+    expect(r.err()).toContain(
+      `INVALID_REQUEST: No existing xai CLI login found in its default location (${resolve(user, '.grok')}).`,
+    );
+    expect(r.err()).toContain('\nhint: Run iron-proxy profiles discover');
+    expect(await iron.listProfiles()).toEqual([]);
+    // Gemini is never adopted from a default home.
+    const g = io();
+    expect(await runCli(['profiles', 'adopt', 'google'], g.io)).toBe(1);
+    expect(g.err()).toContain('No existing google CLI login found in its default location.');
+  });
+});
+
 describe('hints', () => {
   it('prints the hint on its own line after the error', async () => {
     const r = io();
@@ -113,7 +140,7 @@ describe('hints', () => {
     expect(await runCli(['chat', 'google', 'hi'], c.io)).toBe(1);
     expect(c.err()).toContain('NO_PROFILE');
     expect(c.err()).toContain(
-      '\nhint: Add a google account: iron-proxy profiles add --provider google --lane cli --title',
+      '\nhint: Add an account for google: iron-proxy profiles add --provider google --lane cli --title',
     );
   });
 });

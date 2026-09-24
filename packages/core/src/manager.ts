@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { rm, stat } from 'node:fs/promises';
 import type {
   AdoptLoginInput,
@@ -75,6 +75,27 @@ function samePath(a: string, b: string): boolean {
     return process.platform === 'win32' ? r.toLowerCase() : r;
   };
   return norm(a) === norm(b);
+}
+
+/**
+ * True only when `child` is a path strictly below `parent`: not `parent` itself,
+ * not a sibling that merely shares its prefix (`cli-homes-evil`), not outside it.
+ * Case-insensitive on Windows. Exported for tests.
+ */
+export function isStrictlyInside(
+  parent: string,
+  child: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const fold = (p: string) => (platform === 'win32' ? p.toLowerCase() : p);
+  const rel = relative(fold(resolve(parent)), fold(resolve(child)));
+  // Only a real parent step escapes: a child named '..cache' is still inside.
+  const escapes =
+    rel === '..' ||
+    rel.startsWith(`..${sep}`) ||
+    rel.startsWith('../') ||
+    (platform === 'win32' && rel.startsWith('..\\'));
+  return rel !== '' && !escapes && !isAbsolute(rel);
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -239,7 +260,12 @@ export class IronProxy {
       if (patch.defaultModel) p.defaultModel = patch.defaultModel;
       else delete p.defaultModel;
     }
-    if (patch.cli && p.cli) p.cli = { ...p.cli, ...patch.cli };
+    if (patch.cli && p.cli) {
+      // `adopted` is set only by adoptLogin and never by a patch: clearing it would let
+      // deleteProfile remove a login the user made. An adopted profile keeps its home.
+      const { adopted: _adopted, home, ...rest } = patch.cli;
+      p.cli = { ...p.cli, ...rest, ...(home !== undefined && !p.cli.adopted ? { home } : {}) };
+    }
     if (patch.apiKey && p.apiKey) p.apiKey = { ...p.apiKey, ...patch.apiKey };
     if (patch.oauth && p.oauth) p.oauth = { ...p.oauth, ...patch.oauth };
     p.updatedAt = isoNow(this.clock);
@@ -269,7 +295,7 @@ export class IronProxy {
       p.cli?.home &&
       !p.cli.adopted &&
       !opts.keepFiles &&
-      p.cli.home.startsWith(join(this.dataDir, 'cli-homes'))
+      isStrictlyInside(join(this.dataDir, 'cli-homes'), p.cli.home)
     ) {
       await rm(p.cli.home, { recursive: true, force: true }).catch(() => {});
     }
@@ -332,48 +358,60 @@ export class IronProxy {
    */
   async discoverLogins(): Promise<DiscoveredLogin[]> {
     const profiles = await this.profiles.list();
+    // Each vendor's status command runs at the same time; results keep registry order.
+    const probed = await Promise.all(
+      this.registry.list().map(async (adapter) => {
+        const lane = adapter.lanes.cli;
+        if (!(lane instanceof CliLane)) return undefined;
+        const found = lane.spec.defaultHome?.(this.env);
+        if (!found) return undefined;
+        const home = resolve(found);
+        if (!(await isDirectory(home))) return undefined;
+        // A throwaway profile, never stored: `adopted` keeps ensureHome from touching the directory.
+        const probe: Profile = {
+          id: `discover-${adapter.id}`,
+          title: lane.spec.displayName,
+          provider: adapter.id,
+          lane: 'cli',
+          order: 0,
+          enabled: true,
+          cli: { home, adopted: true },
+          createdAt: '',
+          updatedAt: '',
+        };
+        const installed = !!(await lane.findBinary(probe));
+        const status = installed
+          ? await lane.checkAuth(probe).catch(() => 'unknown' as const)
+          : 'unknown';
+        return { provider: adapter.id, binary: lane.spec.binary, home, installed, status };
+      }),
+    );
     const taken = new Set(profiles.map((p) => p.title));
     const out: DiscoveredLogin[] = [];
-    for (const adapter of this.registry.list()) {
-      const lane = adapter.lanes.cli;
-      if (!(lane instanceof CliLane)) continue;
-      const found = lane.spec.defaultHome?.(this.env);
-      if (!found) continue;
-      const home = resolve(found);
-      if (!(await isDirectory(home))) continue;
-      // A throwaway profile, never stored: `adopted` keeps ensureHome from touching the directory.
-      const probe: Profile = {
-        id: `discover-${adapter.id}`,
-        title: lane.spec.displayName,
-        provider: adapter.id,
-        lane: 'cli',
-        order: 0,
-        enabled: true,
-        cli: { home, adopted: true },
-        createdAt: '',
-        updatedAt: '',
-      };
-      const installed = !!(await lane.findBinary(probe));
-      const status = installed
-        ? await lane.checkAuth(probe).catch(() => 'unknown' as const)
-        : 'unknown';
-      const owner = profiles.find((p) => !!p.cli?.home && samePath(p.cli.home, home));
+    for (const f of probed) {
+      if (!f) continue;
+      const owner = profiles.find((p) => !!p.cli?.home && samePath(p.cli.home, f.home));
       const suggestedTitle = freeTitle(
-        `${PROVIDER_SHORT_NAMES[adapter.id]} (existing login)`,
+        `${PROVIDER_SHORT_NAMES[f.provider]} (existing login)`,
         taken,
       );
       taken.add(suggestedTitle);
-      out.push({
-        provider: adapter.id,
-        binary: lane.spec.binary,
-        home,
-        installed,
-        status,
-        ...(owner ? { adoptedProfileId: owner.id } : {}),
-        suggestedTitle,
-      });
+      out.push({ ...f, ...(owner ? { adoptedProfileId: owner.id } : {}), suggestedTitle });
     }
     return out;
+  }
+
+  /**
+   * The default home a provider's vendor CLI uses on this machine (resolved, not
+   * checked for existence), without running anything. Undefined when the
+   * provider has no vendor CLI or the CLI has no default home.
+   */
+  defaultCliHome(provider: ProviderId): string | undefined {
+    if (!PROVIDER_IDS.includes(provider)) return undefined;
+    const lane = this.registry.get(provider).lanes.cli;
+    if (!(lane instanceof CliLane)) return undefined;
+    const found = lane.spec.defaultHome?.(this.env);
+    return found ? resolve(found) : undefined;
   }
 
   /**

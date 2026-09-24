@@ -132,7 +132,7 @@ export class NoProfileError extends IronProxyError {
   constructor(provider: ProviderId) {
     super('NO_PROFILE', `No enabled profile for provider "${provider}". Add one and log in.`, {
       details: { provider },
-      hint: `Add a ${provider} account: ${addAccountCommand(provider)} (then iron-proxy login <id>), or 'Add account' in the switcher.`,
+      hint: `Add an account for ${provider}: ${addAccountCommand(provider)} (then iron-proxy login <id>), or 'Add account' in the switcher.`,
     });
     this.name = 'NoProfileError';
   }

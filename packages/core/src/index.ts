@@ -67,6 +67,7 @@ export {
   run,
   spawnLines,
   which,
+  candidateExtensions,
   type RunResult,
   type SpawnOptions,
 } from './adapters/cli/runner.js';

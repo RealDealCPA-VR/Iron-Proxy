@@ -72,11 +72,11 @@ The same accounts work when you type `claude`, `codex`, `grok` or `gemini` yours
 ```bash
 npx iron-proxy run anthropic                     # starts Claude Code as the account that is ready right now
 npx iron-proxy run openai -- --model gpt-5       # anything after -- goes to the vendor CLI
-eval "$(npx iron-proxy env anthropic)"           # bash/zsh: this shell now runs claude as that account
+eval "$(npx iron-proxy env anthropic --shell bash)"  # bash/zsh (Git Bash too): this shell now runs claude as that account
 npx iron-proxy env anthropic | Out-String | Invoke-Expression  # PowerShell (--shell cmd prints set "..." lines)
 ```
 
-`run` picks the account a request would use first (enabled, not parked, signed in, lowest order), prints `Using "<title>" (<provider>)`, and starts the vendor CLI with its home variable set and every `*_API_KEY` removed, so the subscription pays, not a stray key. `env` prints only the home variable (plus the profile's own `cli.env` entries) and lines that clear the API-key variables; never `PATH`, never a secret.
+`run` picks the account a request would use first (enabled, not parked, signed in, lowest order), prints `Using "<title>" (<provider>)` (with `--profile id` it uses that account even when it is parked or signed out, and prints a `Note:` line saying so), and starts the vendor CLI with its home variable set and every `*_API_KEY` removed, so the subscription pays, not a stray key. On Windows `env` prints PowerShell lines unless you pass `--shell bash` or `--shell cmd`. `env` prints only the home variable (plus the profile's own `cli.env` entries) and lines that clear the API-key variables; never `PATH`, never a secret.
 
 An interactive session **cannot switch accounts mid-session**: it stays on the account it started with. When that account hits its limit, quit and `iron-proxy run` again; the next ready account takes over.
 

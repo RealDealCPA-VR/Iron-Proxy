@@ -136,7 +136,10 @@ describe('iron-proxy run', () => {
     expect(await runCli(['run', 'anthropic', '--profile', first.id, 'echo-run'], pinned.io)).toBe(
       0,
     );
-    expect(pinned.err()).toBe('Using "First" (anthropic)\n');
+    // First is parked, so the pin is honoured with a note saying so.
+    expect(pinned.err()).toMatch(
+      /^Using "First" \(anthropic\)\nNote: "First" is parked until .+; it may refuse requests\.\n$/,
+    );
     expect(pinned.report().home).toBe(first.cli!.home);
   });
 
@@ -218,6 +221,55 @@ describe('iron-proxy env', () => {
       expect(r.out()).not.toMatch(/\bPATH=/);
       expect(r.calls).toHaveLength(0);
     }
+  });
+
+  it('uses a pinned parked or signed-out account but says so on stderr (run and env)', async () => {
+    const parked = await account('Parked One');
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    await iron.router.park(parked, { kind: 'quota-exhausted', source: 'status', resetAt: until });
+    const local = new Date(until).toLocaleString();
+
+    const e = io();
+    expect(
+      await runCli(['env', 'anthropic', '--shell', 'bash', '--profile', parked.id], e.io),
+    ).toBe(0);
+    expect(e.out()).toContain(`export CLAUDE_CONFIG_DIR=`);
+    expect(e.err()).toContain(
+      `Note: "Parked One" is parked until ${local}; it may refuse requests.\n`,
+    );
+
+    const r = io();
+    expect(await runCli(['run', 'anthropic', '--profile', parked.id, 'echo-run'], r.io)).toBe(0);
+    expect(r.err()).toContain(
+      `Note: "Parked One" is parked until ${local}; it may refuse requests.\n`,
+    );
+    expect(r.report().home).toBe(parked.cli!.home);
+
+    const out = await iron.createProfile({
+      title: 'Signed Out',
+      provider: 'anthropic',
+      lane: 'cli',
+      cli: { home: join(dir, 'homes', 'signed-out') },
+    });
+    await iron.refreshStatus(out.id);
+    expect((await iron.allStates())[out.id]?.status).toBe('unauthenticated');
+    const s = io();
+    expect(await runCli(['env', 'anthropic', '--shell', 'bash', '--profile', out.id], s.io)).toBe(
+      0,
+    );
+    expect(s.err()).toContain(`Note: "Signed Out" is not signed in: iron-proxy login ${out.id}\n`);
+    const sr = io();
+    expect(await runCli(['run', 'anthropic', '--profile', out.id, 'echo-run'], sr.io)).toBe(0);
+    expect(sr.err()).toContain(`Note: "Signed Out" is not signed in: iron-proxy login ${out.id}\n`);
+
+    // A ready pinned account, and an unpinned pick, print no note.
+    const ready = await account('Ready');
+    const q = io();
+    expect(await runCli(['env', 'anthropic', '--shell', 'bash', '--profile', ready.id], q.io)).toBe(
+      0,
+    );
+    expect(q.err()).not.toContain('Note: "Ready"');
+    for (const x of [e, r, s, sr, q]) expect(x.err()).not.toMatch(/@/);
   });
 
   it('defaults to PowerShell on Windows and bash elsewhere, and rejects an unknown shell', async () => {

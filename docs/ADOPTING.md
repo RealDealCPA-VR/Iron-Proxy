@@ -127,9 +127,9 @@ const ok = found.filter((f) => f.status === 'ok' && !f.adoptedProfileId);
 const profile = await iron.adoptLogin({ provider: ok[0].provider, home: ok[0].home });
 ```
 
-- `discoverLogins()` runs each CLI's own status command against its default home. It never reads the vendor's credential files, never persists anything, and never reports an email. `adoptedProfileId` is set when a profile already uses that home.
+- `discoverLogins()` runs each CLI's own status command against its default home (all of them at once; results keep a fixed provider order). `iron-proxy profiles adopt <provider>` without `--home` looks only at that provider's default home and runs no other CLI. It never reads the vendor's credential files, never persists anything, and never reports an email. `adoptedProfileId` is set when a profile already uses that home.
 - `adoptLogin()` creates a subscription profile whose `cli.home` is that exact directory and marks it `cli.adopted: true`. It refuses (`INVALID_REQUEST`) when the directory does not exist or another profile already uses it.
-- Deleting an adopted profile **never** removes the directory; Iron-Proxy only deletes the homes it created under `<dataDir>/cli-homes`. It also never prepares or recreates an adopted home.
+- Deleting an adopted profile **never** removes the directory; Iron-Proxy only deletes a home that is not adopted and lies strictly inside `<dataDir>/cli-homes` (not that folder itself, not a sibling such as `cli-homes-old`). It also never prepares or recreates an adopted home. `updateProfile` (and `PATCH /iron/profiles/:id`) ignores `cli.adopted` in a patch, and ignores `cli.home` for an adopted profile, so no patch can turn an adopted login into one Iron-Proxy would delete.
 - **Logging out an adopted profile signs the user's own CLI out too**, because it is the same login. The React switcher asks for confirmation first, and `iron-proxy logout` prints a note.
 - Gemini is not offered: where the Gemini CLI keeps its sign-in by default is unverified (see [PROVIDERS.md](PROVIDERS.md#existing-logins)).
 - Tests and unusual setups can pass `createIronProxy({ env })` so discovery reads a different `HOME` / `USERPROFILE` / home variables than `process.env`.
@@ -143,21 +143,21 @@ The same two calls exist on every transport: `IronClient.discoverLogins()` / `ad
 To use an account from the user's own terminal:
 
 - `iron-proxy run <provider> [--profile id] [-- args]` starts the vendor CLI interactively as `iron.pickProfile(provider)`: the account the router would try first right now (enabled, cli lane, not parked, expired parks cleared exactly as a request clears them, not signed out, lowest order). The environment is the lane's own scrubbed one (`iron.interactiveCommand(id, args)`: home variable set, `*_API_KEY` removed), the child's exit code is passed through, and on Windows a `.cmd` shim runs through `cmd.exe /d /s /c` with every argument escaped.
-- `iron-proxy env <provider> [--profile id] [--shell bash|powershell|cmd]` prints the lines to paste or eval (`iron.shellEnv(id)`): the home variable and the profile's `cli.env` entries, plus lines clearing the API-key variables for bash and PowerShell. Never `PATH`, never a secret.
-- `pickProfile` throws `NO_PROFILE`, `ALL_PROFILES_EXHAUSTED` (with the earliest reset) or `AUTH_REQUIRED`, each with its hint; with `profileId` it returns that account or `INVALID_REQUEST` when it is not a cli account of that provider.
+- `iron-proxy env <provider> [--profile id] [--shell bash|powershell|cmd]` prints the lines to paste or eval (`iron.shellEnv(id)`; the default is PowerShell on Windows and bash elsewhere, so use `eval "$(iron-proxy env anthropic --shell bash)"` in Git Bash): the home variable and the profile's `cli.env` entries, plus lines clearing the API-key variables for bash and PowerShell. Never `PATH`, never a secret.
+- `pickProfile` throws `NO_PROFILE`, `ALL_PROFILES_EXHAUSTED` (with the earliest reset) or `AUTH_REQUIRED`, each with its hint; with `profileId` it returns that account (even when parked or signed out; `run` and `env` then print a `Note:` line on stderr saying so) or `INVALID_REQUEST` when it is not a cli account of that provider.
 - **An interactive session cannot switch accounts mid-session.** Failover happens between requests Iron-Proxy runs; a vendor CLI you are typing into stays on the account it started with. When it hits the limit, quit and `iron-proxy run` again: the next ready account is picked.
 
 ## Every error says what to do next
 
 Every `IronProxyError` carries a `hint`: one short imperative sentence for the user, never containing a secret or an email. Examples:
 
-| Code                     | Hint (shape)                                                                                                 |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `NO_PROFILE`             | Add a anthropic account: `iron-proxy profiles add --provider anthropic …`, or 'Add account' in the switcher. |
-| `AUTH_REQUIRED`          | Log "Work Claude" in again: `iron-proxy login <id>`, or 'Log in' on it in the switcher.                      |
-| `ALL_PROFILES_EXHAUSTED` | Wait until 3:40:00 PM for the first reset, or add another anthropic account: …                               |
-| `CLI_NOT_FOUND`          | Install Claude Code: `npm install -g @anthropic-ai/claude-code` (the official command per CLI).              |
-| `STREAM_INTERRUPTED`     | Resend; the next account will take it.                                                                       |
+| Code                     | Hint (shape)                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `NO_PROFILE`             | Add an account for anthropic: `iron-proxy profiles add --provider anthropic …`, or 'Add account' in the switcher. |
+| `AUTH_REQUIRED`          | Log "Work Claude" in again: `iron-proxy login <id>`, or 'Log in' on it in the switcher.                           |
+| `ALL_PROFILES_EXHAUSTED` | Wait until 3:40:00 PM for the first reset, or add another anthropic account: …                                    |
+| `CLI_NOT_FOUND`          | Install Claude Code: `npm install -g @anthropic-ai/claude-code` (the official command per CLI).                   |
+| `STREAM_INTERRUPTED`     | Resend; the next account will take it.                                                                            |
 
 Where it surfaces: `err.hint` in Node; `error.hint` in serialized errors and stream `error` events; the `iron.hint` field of every proxy error body; `.hint` on `HttpIronClientError` and on the Electron preload's `IronBridgeError`; a `hint: …` line after the error in the CLI; and under the message in the React `ErrorBanner` (`ClientError.hint`). `DEFAULT_HINTS` has one per code; raisers pass a more specific one where they know more.
 

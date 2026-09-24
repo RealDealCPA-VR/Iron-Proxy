@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
@@ -402,15 +402,17 @@ async function profiles(
         });
       let home = typeof v.home === 'string' ? v.home : undefined;
       if (!home) {
-        home = (await iron.discoverLogins()).find((f) => f.provider === provider)?.home;
-        if (!home)
+        // Only this provider's default home: no other vendor CLI is run.
+        const found = iron.defaultCliHome(provider);
+        if (!found || !(await isDir(found)))
           throw new IronProxyError(
             'INVALID_REQUEST',
-            `No existing ${provider} CLI login found in its default location.`,
+            `No existing ${provider} CLI login found in its default location${found ? ` (${found})` : ''}.`,
             {
               hint: 'Run iron-proxy profiles discover to see what was found, or pass the directory with --home DIR.',
             },
           );
+        home = found;
       }
       const p = await iron.adoptLogin({
         provider,
@@ -596,7 +598,24 @@ async function runVendor(
       binary: cmd.binary,
     });
   io.stderr.write(`Using "${p.title}" (${p.provider})\n`);
+  if (profileId) await notePinnedState(iron, io, p);
   return launchInteractive(io.spawn ?? nodeSpawn, buildLaunch(resolved, cmd.args), cmd.env);
+}
+
+/**
+ * A pinned account is used even when it is parked or signed out (the user chose
+ * it), but say so on stderr: the vendor CLI may refuse. Never prints an email.
+ */
+async function notePinnedState(iron: IronProxy, io: CliIo, p: Profile): Promise<void> {
+  const st = (await iron.allStates())[p.id];
+  if (st?.status === 'parked')
+    io.stderr.write(
+      st.parkedUntil
+        ? `Note: "${p.title}" is parked until ${fmtTime(st.parkedUntil)}; it may refuse requests.\n`
+        : `Note: "${p.title}" is parked; it may refuse requests.\n`,
+    );
+  else if (st?.status === 'unauthenticated')
+    io.stderr.write(`Note: "${p.title}" is not signed in: iron-proxy login ${p.id}\n`);
 }
 
 type ShellKind = 'bash' | 'powershell' | 'cmd';
@@ -650,6 +669,7 @@ async function envLines(
     for (const k of unset) lines.push(`Remove-Item Env:${k} -ErrorAction SilentlyContinue`);
   io.stdout.write(`${lines.join('\n')}\n`);
   io.stderr.write(`Using "${p.title}" (${p.provider})\n`);
+  if (profileId) await notePinnedState(iron, io, p);
   io.stderr.write(
     shell === 'cmd'
       ? `Note: these lines set the account's home only; API-key variables are unset only by iron-proxy run ${provider}, so clear them yourself if they are set.\n`
@@ -664,41 +684,76 @@ async function envLines(
 
 type Ask = (question: string, opts?: { secret?: boolean }) => Promise<string>;
 
-/** A prompt on the terminal via node:readline. A secret answer is not echoed. */
-function readlinePrompt(): { ask: Ask; close(): void } {
+/**
+ * A prompt on the terminal via node:readline. A secret answer is not echoed.
+ *
+ * Answers come from one line queue rather than `rl.question` per prompt, so
+ * lines piped in all at once (several answers in one `printf | iron-proxy setup`)
+ * are kept in order instead of being dropped between questions. After the input ends,
+ * every further question resolves to ''. `input`/`output` are injectable for tests.
+ */
+export function readlinePrompt(
+  streams: {
+    input?: NodeJS.ReadableStream & { isTTY?: boolean };
+    output?: { write(s: string | Buffer): unknown };
+  } = {},
+): { ask: Ask; close(): void } {
+  const input = streams.input ?? process.stdin;
+  const sink = streams.output ?? process.stdout;
   let muted = false;
   const output = new Writable({
     write(chunk: Buffer | string, _enc, cb) {
-      if (!muted) process.stdout.write(chunk);
+      if (!muted) sink.write(chunk);
       cb();
     },
   });
-  const rl = createInterface({
-    input: process.stdin,
-    output,
-    terminal: !!process.stdin.isTTY,
-  });
+  const rl = createInterface({ input, output, terminal: !!input.isTTY });
+  const lines: string[] = [];
+  const waiting: Array<(line: string) => void> = [];
   let closed = false;
-  rl.on('close', () => (closed = true));
-  const ask: Ask = (question, opts = {}) =>
-    new Promise((resolve) => {
-      if (closed) return resolve('');
-      const onClose = () => resolve('');
-      rl.once('close', onClose);
-      if (opts.secret) {
-        process.stdout.write(question);
-        muted = true;
-      }
-      rl.question(opts.secret ? '' : question, (answer) => {
-        rl.off('close', onClose);
-        if (opts.secret) {
-          muted = false;
-          process.stdout.write('\n');
-        }
-        resolve(answer);
-      });
-    });
+  rl.on('line', (line) => {
+    const next = waiting.shift();
+    if (next) next(line);
+    else lines.push(line);
+  });
+  rl.on('close', () => {
+    closed = true;
+    for (const next of waiting.splice(0)) next('');
+  });
+  const nextLine = (): Promise<string> => {
+    if (lines.length) return Promise.resolve(lines.shift()!);
+    if (closed) return Promise.resolve('');
+    return new Promise((resolve) => waiting.push(resolve));
+  };
+  const ask: Ask = async (question, opts = {}) => {
+    if (!opts.secret) {
+      // readline draws the question as its own prompt, so a terminal redraw
+      // (backspace, a resize) repaints the question instead of readline's default '> '.
+      rl.setPrompt(question);
+      rl.prompt(true);
+      return nextLine();
+    }
+    // A secret: show the question once, then give readline an empty prompt while the
+    // echo is muted, so a redraw has nothing to repaint.
+    sink.write(question);
+    rl.setPrompt('');
+    muted = true;
+    try {
+      return await nextLine();
+    } finally {
+      muted = false;
+      sink.write('\n');
+    }
+  };
   return { ask, close: () => rl.close() };
+}
+
+async function isDir(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function isYes(answer: string, byDefault: boolean): boolean {

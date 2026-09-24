@@ -14,6 +14,8 @@ import {
   grokSpec,
   type IronProxy,
 } from '@iron-proxy/core';
+import { PassThrough } from 'node:stream';
+import { readlinePrompt } from '../src/commands.js';
 import { runCli, type CliIo } from '../src/index.js';
 
 const FAKE = fileURLToPath(
@@ -141,6 +143,54 @@ describe('iron-proxy setup', () => {
     expect(await iron.listProfiles()).toEqual([]);
     expect(s.err()).toContain('INVALID_REQUEST: No valid choice given.');
     expect(s.out()).toContain(`You're set. Try: iron-proxy chat anthropic "hello"`);
+  });
+
+  it('the default readline prompt keeps every piped answer, in order, then answers "" after EOF', async () => {
+    const input = new PassThrough();
+    let shown = '';
+    const rp = readlinePrompt({ input, output: { write: (s) => (shown += String(s)) } });
+    // Everything arrives in one chunk before the first question is even asked.
+    input.write('y\nn\n2\nWork Claude\nsk-secret-answer\n');
+    input.end();
+    try {
+      const answers = [
+        await rp.ask('Adopt? '),
+        await rp.ask('Another? '),
+        await rp.ask('Provider [1-3]: '),
+        await rp.ask('Title: '),
+        await rp.ask('API key: ', { secret: true }),
+        await rp.ask('After EOF: '),
+      ];
+      expect(answers).toEqual(['y', 'n', '2', 'Work Claude', 'sk-secret-answer', '']);
+      expect(shown).toContain('Adopt? ');
+      expect(shown).toContain('API key: ');
+      expect(shown).not.toContain('sk-secret-answer');
+    } finally {
+      rp.close();
+    }
+  });
+
+  it('on a terminal, a backspace redraw repaints the question, not readline\'s "> "', async () => {
+    const input = Object.assign(new PassThrough(), {
+      isTTY: true,
+      setRawMode: () => true,
+    });
+    let shown = '';
+    const rp = readlinePrompt({ input, output: { write: (s) => (shown += String(s)) } });
+    try {
+      const answer = rp.ask('Title: ');
+      input.write('ab');
+      input.write('\x7f');
+      input.write('c\r');
+      expect(await answer).toBe('ac');
+      const redraw = shown.lastIndexOf('\u001b[0J');
+      expect(redraw).toBeGreaterThanOrEqual(0);
+      const after = shown.slice(redraw + '\u001b[0J'.length);
+      expect(after.startsWith('Title: ')).toBe(true);
+      expect(after).not.toContain('> ');
+    } finally {
+      rp.close();
+    }
   });
 
   it('--yes adopts every signed-in login without asking and prints the summary', async () => {

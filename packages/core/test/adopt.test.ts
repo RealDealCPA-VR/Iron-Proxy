@@ -8,7 +8,8 @@ import { CliLane } from '../src/adapters/cli/lane.js';
 import { claudeSpec, codexSpec, geminiSpec, grokSpec } from '../src/adapters/cli/specs.js';
 import { LocalIronClient, IRON_CLIENT_METHODS } from '../src/client.js';
 import { IronProxyError } from '../src/errors.js';
-import { createIronProxy, type IronProxy } from '../src/manager.js';
+import { createIronProxy, isStrictlyInside, type IronProxy } from '../src/manager.js';
+import type { Profile } from '../src/types.js';
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-cli/fake-cli.mjs', import.meta.url));
 
@@ -40,8 +41,29 @@ beforeEach(async () => {
 afterEach(async () => {
   await iron?.close();
   iron = undefined;
-  await rm(dir, { recursive: true, force: true });
+  // A background status check may still hold a home open on Windows for a moment.
+  await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
+
+/**
+ * createProfile, then wait for the background status check it starts, so no
+ * fake CLI process still holds the home open when the test deletes it.
+ */
+async function createSettled(input: Parameters<IronProxy['createProfile']>[0]): Promise<Profile> {
+  const seen = new Set<string>();
+  let wake: () => void = () => {};
+  const off = iron!.events.on('profile.state', (e) => {
+    seen.add(e.state.profileId);
+    wake();
+  });
+  try {
+    const p = await iron!.createProfile(input);
+    while (!seen.has(p.id)) await new Promise<void>((r) => (wake = r));
+    return p;
+  } finally {
+    off();
+  }
+}
 
 describe('discoverLogins', () => {
   it('finds signed-in and signed-out default homes, and skips missing ones and Gemini', async () => {
@@ -233,5 +255,142 @@ describe('adoptLogin', () => {
     const [found] = await client.discoverLogins();
     const p = await client.adoptLogin({ provider: found!.provider, home: found!.home });
     expect(p.cli?.adopted).toBe(true);
+  });
+});
+
+describe('an adopted home stays safe from patches and deletes', () => {
+  it('a patch cannot clear cli.adopted or move an adopted home, so deleting leaves the directory', async () => {
+    iron = createIronProxy({ dataDir: data, registry: fakeRegistry(), env: fakeEnv() });
+    // The worst case: an adopted login that sits where Iron-Proxy's own homes live.
+    const home = join(data, 'cli-homes', 'anthropic', 'adopted-here');
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, 'keep.txt'), 'mine');
+    const p = await iron.adoptLogin({ provider: 'anthropic', home });
+
+    // What a PATCH /iron/profiles/:id body could carry.
+    const patched = await iron.updateProfile(p.id, { cli: { home, adopted: false } });
+    expect(patched.cli).toMatchObject({ home: resolve(home), adopted: true });
+    const moved = await iron.updateProfile(p.id, {
+      cli: { home: join(data, 'cli-homes', 'anthropic', 'other'), adopted: true },
+    });
+    expect(moved.cli?.home).toBe(resolve(home));
+    expect((await iron.getProfile(p.id)).cli).toMatchObject({ home: resolve(home), adopted: true });
+
+    await iron.deleteProfile(p.id);
+    expect(await iron.listProfiles()).toEqual([]);
+    expect(await readFile(join(home, 'keep.txt'), 'utf8')).toBe('mine');
+  });
+
+  it('a patch still moves the home of a profile Iron-Proxy owns, and never marks it adopted', async () => {
+    iron = createIronProxy({ dataDir: data, registry: fakeRegistry(), env: fakeEnv() });
+    const p = await createSettled({ title: 'Own', provider: 'anthropic', lane: 'cli' });
+    const next = join(dir, 'moved-home');
+    const patched = await iron.updateProfile(p.id, { cli: { home: next, adopted: true } });
+    expect(patched.cli?.home).toBe(next);
+    expect(patched.cli?.adopted).toBeUndefined();
+  });
+
+  it('deleteProfile removes only a home strictly inside <dataDir>/cli-homes', async () => {
+    iron = createIronProxy({ dataDir: data, registry: fakeRegistry(), env: fakeEnv() });
+    const make = async (title: string, home: string) => {
+      await mkdir(home, { recursive: true });
+      await writeFile(join(home, 'keep.txt'), 'mine');
+      return createSettled({ title, provider: 'anthropic', lane: 'cli', cli: { home } });
+    };
+    // A sibling that merely shares the prefix, and cli-homes itself: never deleted.
+    const sibling = join(data, 'cli-homes-evil', 'x');
+    const root = join(data, 'cli-homes');
+    const s = await make('Sibling', sibling);
+    const r = await make('Root', root);
+    await iron.deleteProfile(s.id);
+    await iron.deleteProfile(r.id);
+    expect(await readFile(join(sibling, 'keep.txt'), 'utf8')).toBe('mine');
+    expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('mine');
+
+    // A home Iron-Proxy created inside cli-homes still goes (the control).
+    const own = await createSettled({ title: 'Own', provider: 'anthropic', lane: 'cli' });
+    expect((await stat(own.cli!.home)).isDirectory()).toBe(true);
+    await iron.deleteProfile(own.id);
+    await expect(stat(own.cli!.home)).rejects.toThrow();
+    expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('mine');
+  });
+
+  it('isStrictlyInside rejects the folder itself, prefix siblings, parents and escapes', () => {
+    const base = join(dir, 'cli-homes');
+    expect(isStrictlyInside(base, join(base, 'anthropic', 'p1'))).toBe(true);
+    expect(isStrictlyInside(base, base)).toBe(false);
+    expect(isStrictlyInside(base, join(base, '.'))).toBe(false);
+    expect(isStrictlyInside(base, `${base}-evil`)).toBe(false);
+    expect(isStrictlyInside(base, join(`${base}-evil`, 'x'))).toBe(false);
+    expect(isStrictlyInside(base, join(base, '..', 'elsewhere'))).toBe(false);
+    // A child whose name merely begins with '..' is inside; only a parent step escapes.
+    expect(isStrictlyInside(base, join(base, '..cache'))).toBe(true);
+    expect(isStrictlyInside(base, join(base, '..cache', 'p1'))).toBe(true);
+    expect(isStrictlyInside(base, join(base, '..'))).toBe(false);
+    expect(isStrictlyInside(base, dir)).toBe(false);
+    expect(isStrictlyInside(base, join(tmpdir(), 'unrelated'))).toBe(false);
+    // Case-folded on Windows, exact elsewhere.
+    const upper = join(base.toUpperCase(), 'x');
+    if (process.platform === 'win32') expect(isStrictlyInside(base, upper, 'win32')).toBe(true);
+    else if (upper !== join(base, 'x')) expect(isStrictlyInside(base, upper, 'linux')).toBe(false);
+  });
+});
+
+describe('discoverLogins runs the status probes in parallel', () => {
+  it('starts every probe before any finishes, and keeps registry order in the result', async () => {
+    const homes = {
+      anthropic: join(user, '.claude'),
+      openai: join(user, '.codex'),
+      xai: join(user, '.grok'),
+    };
+    for (const h of Object.values(homes)) {
+      await mkdir(h, { recursive: true });
+      await writeFile(join(h, 'logged-in'), 'yes');
+    }
+    let started = 0;
+    let release!: () => void;
+    const allStarted = new Promise<void>((r) => (release = r));
+    const finished: string[] = [];
+    /** A real CliLane whose status check waits until all three probes are running. */
+    class GatedLane extends CliLane {
+      constructor(
+        spec: ConstructorParameters<typeof CliLane>[0],
+        private readonly delayMs: number,
+      ) {
+        super(spec);
+      }
+      override async checkAuth(profile: Profile) {
+        if (++started === 3) release();
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('probes ran one after another')), 3000),
+        );
+        await Promise.race([allStarted, timeout]);
+        await new Promise((r) => setTimeout(r, this.delayMs));
+        const status = await super.checkAuth(profile);
+        finished.push(profile.provider);
+        return status;
+      }
+    }
+    iron = createIronProxy({
+      dataDir: data,
+      // The first in registry order finishes last.
+      registry: createDefaultRegistry()
+        .addLane('anthropic', new GatedLane({ ...claudeSpec, binary: FAKE }, 300))
+        .addLane('openai', new GatedLane({ ...codexSpec, binary: FAKE }, 150))
+        .addLane('xai', new GatedLane({ ...grokSpec, binary: FAKE }, 0)),
+      env: fakeEnv(),
+    });
+    const found = await iron.discoverLogins();
+    expect(found.map((f) => [f.provider, f.status])).toEqual([
+      ['anthropic', 'ok'],
+      ['openai', 'ok'],
+      ['xai', 'ok'],
+    ]);
+    expect(finished[finished.length - 1]).toBe('anthropic');
+    expect(found.map((f) => f.suggestedTitle)).toEqual([
+      'Claude (existing login)',
+      'Codex (existing login)',
+      'Grok (existing login)',
+    ]);
   });
 });

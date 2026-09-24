@@ -122,7 +122,7 @@ const cases: Array<[ErrorCode, () => Promise<unknown>, RegExp]> = [
   [
     'NO_PROFILE',
     () => iron.complete(req),
-    /Add a anthropic account: iron-proxy profiles add --provider anthropic .*'Add account' in the switcher/,
+    /Add an account for anthropic: iron-proxy profiles add --provider anthropic .*'Add account' in the switcher/,
   ],
   ['PROFILE_NOT_FOUND', () => iron.getProfile('nope'), /iron-proxy profiles list/],
   [

@@ -209,6 +209,30 @@ export function spawnLines(opts: SpawnOptions): LineStream {
   return { lines, exit, kill: () => child.kill(), child };
 }
 
+/**
+ * The extensions `which` tries after a bare name, in order ('' means the name as
+ * given). On Windows a name is tried with each PATHEXT extension only: npm
+ * installs an extensionless sh script next to claude.cmd, and that script cannot
+ * be started on Windows. A name counts as already having an extension only when
+ * its extension is itself in PATHEXT (case-insensitive), so `claude.CMD` is taken
+ * as-is while a dotted name like `my.tool` still finds `my.tool.cmd`.
+ */
+export function candidateExtensions(
+  binary: string,
+  platform: NodeJS.Platform,
+  pathext: string | undefined,
+): string[] {
+  if (platform !== 'win32') return [''];
+  const exts = (pathext || '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  const base = binary.split(/[\\/]/).pop() ?? binary;
+  const dot = base.lastIndexOf('.');
+  const own = dot > 0 ? base.slice(dot).toLowerCase() : '';
+  return own && exts.includes(own) ? [''] : exts;
+}
+
 /** Locate an executable on PATH (Windows-aware). Returns the resolved path or undefined. */
 export async function which(binary: string): Promise<string | undefined> {
   const { access } = await import('node:fs/promises');
@@ -222,18 +246,10 @@ export async function which(binary: string): Promise<string | undefined> {
     }
   }
   const dirs = (process.env.PATH ?? process.env.Path ?? '').split(delimiter).filter(Boolean);
-  // On Windows a bare name ("claude") is tried with each PATHEXT extension only:
-  // npm installs an extensionless sh script next to claude.cmd, and that script
-  // cannot be started on Windows. A name that already has an extension is taken as-is.
-  const exts =
-    process.platform === 'win32'
-      ? /\.[^\\/.]+$/.test(binary)
-        ? ['']
-        : (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
-      : [''];
+  const exts = candidateExtensions(binary, process.platform, process.env.PATHEXT);
   for (const dir of dirs) {
     for (const ext of exts) {
-      const candidate = join(dir, binary + ext.toLowerCase());
+      const candidate = join(dir, binary + ext);
       try {
         await access(candidate);
         return candidate;
