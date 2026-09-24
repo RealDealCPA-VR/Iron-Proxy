@@ -39,7 +39,7 @@ Every step below is a manual maintainer step. **Nothing has been published yet**
   - macOS: `Iron-Proxy-<version>-x64.dmg`, `Iron-Proxy-<version>-arm64.dmg` and matching `-mac.zip` files,
   - Linux: an `.AppImage` and a `.deb` (x64);
 - computes `SHA256SUMS.txt` over every installer;
-- for a tag, creates the GitHub Release `tray-v<version>` with every installer and `SHA256SUMS.txt` attached, using the workflow's `GITHUB_TOKEN`. A manual run on a branch only uploads the installers as workflow artifacts.
+- for a pushed tag, creates the GitHub Release `tray-v<version>` with every installer and `SHA256SUMS.txt` attached, using the workflow's `GITHUB_TOKEN`. A manual run (Run workflow in the Actions tab), on a branch or even on a `tray-v*` tag, only uploads the installers as workflow artifacts: only a pushed tag creates a release.
 
 The builds are **not code-signed**: Windows installers carry no signature and the macOS app is only ad-hoc signed and not notarised, so SmartScreen and Gatekeeper warn on first launch. The release body and [apps/tray/README.md](../apps/tray/README.md#install) give users the exact steps. Signing and notarisation are open items in [ROADMAP.md](ROADMAP.md).
 

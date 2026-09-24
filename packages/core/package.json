@@ -7,7 +7,7 @@
   "sideEffects": false,
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
       "import": {
@@ -54,5 +54,8 @@
   "homepage": "https://github.com/RealDealCPA-VR/Iron-Proxy/tree/main/packages/core#readme",
   "bugs": {
     "url": "https://github.com/RealDealCPA-VR/Iron-Proxy/issues"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
   }
 }

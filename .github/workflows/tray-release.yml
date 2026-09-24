@@ -3,8 +3,8 @@ name: Tray release
 # Builds the Iron-Proxy tray app installers on Windows, macOS and Linux.
 # - A pushed tag `tray-v<version>` (matching apps/tray/package.json) creates a GitHub Release
 #   with every installer and SHA256SUMS.txt attached.
-# - A manual run (workflow_dispatch) on a branch only uploads the installers as workflow
-#   artifacts; nothing is released.
+# - A manual run (workflow_dispatch), on a branch or on a tray-v* tag, only uploads the
+#   installers as workflow artifacts; nothing is released.
 # The builds are UNSIGNED (Windows) and ad-hoc signed (macOS); the release body says so.
 
 on:
@@ -106,7 +106,8 @@ jobs:
           name: installers-all
           path: installers/*
       - name: Create the GitHub Release
-        if: startsWith(github.ref, 'refs/tags/tray-v')
+        # Only for a pushed tag: a manual run, even on a tray-v* tag, only uploads artifacts.
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/tray-v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

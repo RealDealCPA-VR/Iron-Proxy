@@ -446,6 +446,51 @@ describe('tray app wiring', () => {
     expect(d.url).toBe(info.proxyUrl);
   });
 
+  it('starts its own proxy once when the port changes after the shared one has gone', async () => {
+    const other = { url: 'http://127.0.0.1:45682', token: 'other-token', pid: 999_994 };
+    await writeFile(join(dir, 'proxy.json'), JSON.stringify(other));
+    const alive = new Set([other.pid]);
+    // Every proxy.json this app writes follows one successful listen.
+    const listened: string[] = [];
+    const createServer = (o: ProxyServerOptions): ProxyServer => {
+      const s = createProxyServer(o);
+      const listen = s.listen.bind(s);
+      s.listen = async () => {
+        const info = await listen();
+        listened.push(info.url);
+        return info;
+      };
+      return s;
+    };
+    const electron = createFakeElectron();
+    handle = await start(electron, {
+      isAlive: (pid) => alive.has(pid),
+      createServer,
+      watch: () => ({ close() {} }),
+    });
+    expect(handle!.info()).toMatchObject({ proxyUrl: other.url, proxyOwned: false });
+
+    // The shared proxy's process is gone (left proxy.json behind), then the port changes.
+    alive.delete(other.pid);
+    const probe = createNetServer();
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const wanted = (probe.address() as { port: number }).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const info = (await electron.ipc.invoke(TRAY_CHANNELS.setSettings, {
+      proxyPort: wanted,
+    })) as TrayInfo;
+
+    expect(info).toMatchObject({
+      proxyUrl: `http://127.0.0.1:${wanted}`,
+      proxyPort: wanted,
+      proxyOwned: true,
+    });
+    expect(listened).toEqual([`http://127.0.0.1:${wanted}`]);
+    const d = JSON.parse(await readFile(join(dir, 'proxy.json'), 'utf8'));
+    expect(d).toMatchObject({ url: info.proxyUrl, pid: process.pid });
+    expect((await fetch(`${info.proxyUrl}/iron/health`)).status).toBe(200);
+  });
+
   it('relabels the menu when a rest ends, with one timer and no polling', async () => {
     await saveSettings(dir, { ...defaultSettings(), proxyPort: await takenPort() });
     let now = Date.parse('2026-09-24T12:00:00Z');

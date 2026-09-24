@@ -25,8 +25,10 @@ The desktop tray app (`apps/tray`) shares its accounts with the `iron-proxy` CLI
 
 ## Installers and npm packages
 
-- The tray installers on GitHub Releases are built by `.github/workflows/tray-release.yml` from the tagged commit, and each release carries a `SHA256SUMS.txt`. They are **not code-signed** yet (unsigned on Windows, ad-hoc signed and not notarised on macOS), so a checksum match against the release page, or building from source, is the only integrity check today. Signing is on the roadmap.
-- The npm packages are published only from the release workflow with npm provenance (`publishConfig.provenance`), which links each tarball to the commit and workflow run that built it.
+Nothing has been published yet: no npm package, no GitHub Release, no winget or Homebrew entry (see [docs/RELEASING.md](docs/RELEASING.md)). The points below are how releases will be made.
+
+- The tray installers on GitHub Releases will be built by `.github/workflows/tray-release.yml` from the tagged commit, and each release will carry a `SHA256SUMS.txt`. They are **not code-signed** yet (unsigned on Windows, ad-hoc signed and not notarised on macOS), so a checksum match against the release page, or building from source, is the only integrity check today. Signing is on the roadmap.
+- The npm packages will be published only from the release workflow (`.github/workflows/release.yml`) with npm provenance (`publishConfig.provenance`), which links each tarball to the commit and workflow run that built it. A local `npm publish` of them fails on purpose.
 
 ## What it does not protect against
 

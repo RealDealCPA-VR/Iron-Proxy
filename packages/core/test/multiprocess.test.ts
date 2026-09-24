@@ -1,10 +1,11 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import ts from 'typescript';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { FileProfileStore } from '../src/store/profile-store.js';
 import { FileStateStore } from '../src/store/state-store.js';
 import { FileUsageStore } from '../src/store/usage-store.js';
@@ -20,6 +21,7 @@ import type { Profile } from '../src/types.js';
 const PKG = fileURLToPath(new URL('..', import.meta.url));
 const CHILD = fileURLToPath(new URL('./fixtures/store-child.mjs', import.meta.url));
 const DIST = join(PKG, 'dist', 'index.js');
+const LOCK_CHILD = fileURLToPath(new URL('./fixtures/lock-child.mjs', import.meta.url));
 
 function newestMtime(dir: string): number {
   let newest = 0;
@@ -184,5 +186,82 @@ describe('the lock file', () => {
     await expect(s.put(profile('a'))).rejects.toThrow(/Timed out/);
     await rm(lock);
     expect(await s.list()).toEqual([]);
+  });
+
+  describe('stale lock taken over by several waiters at once', () => {
+    // The children run src/store/file-lock.ts itself, compiled to plain
+    // JavaScript here (it imports only node builtins), not the whole package.
+    let moduleDir: string;
+    let lockModule: string;
+    beforeAll(async () => {
+      moduleDir = await mkdtemp(join(tmpdir(), 'iron-lockmod-'));
+      lockModule = join(moduleDir, 'file-lock.mjs');
+      const src = await readFile(join(PKG, 'src', 'store', 'file-lock.ts'), 'utf8');
+      const out = ts.transpileModule(src, {
+        compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+      });
+      await writeFile(lockModule, out.outputText);
+    });
+    afterAll(async () => {
+      await rm(moduleDir, { recursive: true, force: true });
+    });
+
+    it('only one of them holds the lock at a time', async () => {
+      const WAITERS = 6;
+      const ROUNDS = 8;
+      const lock = join(dir, 'data.json.lock');
+      const outs: string[] = [];
+      const exits: Promise<void>[] = [];
+      for (let i = 0; i < WAITERS; i++) {
+        const child = spawn(
+          process.execPath,
+          [LOCK_CHILD, lockModule, dir, `w${i}`, String(ROUNDS)],
+          {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        children.push(child);
+        outs.push('');
+        let err = '';
+        child.stdout!.on('data', (d: Buffer) => (outs[i] += d.toString()));
+        child.stderr!.on('data', (d: Buffer) => (err += d.toString()));
+        exits.push(
+          new Promise<void>((resolve, reject) =>
+            child.on('exit', (c) =>
+              c === 0 ? resolve() : reject(new Error(`waiter w${i} exited ${c}: ${err}`)),
+            ),
+          ),
+        );
+      }
+      const failed = Promise.race(exits.map((e) => e.then(() => new Promise<never>(() => {}))));
+      const allReady = async (round: number) => {
+        while (!outs.every((o) => o.includes(`ready ${round}\n`))) {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      };
+      for (let round = 0; round < ROUNDS; round++) {
+        await Promise.race([allReady(round), failed]);
+        // Every waiter finds a lock left over from a crash and tries to take it over.
+        await writeFile(lock, 'crashed');
+        const old = new Date(Date.now() - 60_000);
+        await utimes(lock, old, old);
+        await writeFile(join(dir, `go-${round}`), '');
+      }
+      await Promise.all(exits);
+
+      const lines = (await readFile(join(dir, 'log'), 'utf8')).trim().split('\n');
+      expect(lines).toHaveLength(WAITERS * ROUNDS * 2);
+      // Strictly enter/leave pairs of one waiter: no second waiter ever entered
+      // while another was inside.
+      for (let i = 0; i < lines.length; i += 2) {
+        const who = lines[i]!.replace(/^enter /, '');
+        expect(lines[i]).toBe(`enter ${who}`);
+        expect(lines[i + 1]).toBe(`leave ${who}`);
+      }
+      expect(existsSync(lock)).toBe(false);
+      expect(
+        readdirSync(dir).filter((f) => f.includes('.stale-') || f.endsWith('.takeover')),
+      ).toEqual([]);
+    }, 120_000);
   });
 });

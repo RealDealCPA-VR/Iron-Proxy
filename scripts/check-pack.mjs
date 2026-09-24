@@ -5,7 +5,8 @@
 //   - README.md and LICENSE are in it,
 //   - test/ and src/ are not (unless an export points there),
 //   - package.json carries publishConfig { access: public, provenance: true }, repository,
-//     homepage, bugs and license, and every exported JS entry has a matching types entry.
+//     homepage, bugs and license, every exported JS entry has a matching types entry, and a
+//     CommonJS main is paired with CommonJS (.d.cts) top-level types.
 // Run it after `pnpm build` (the dist files must exist):
 //
 //   node scripts/check-pack.mjs [package-dir ...]     (default: the five published packages)
@@ -54,6 +55,12 @@ export function manifestProblems(pkg) {
   if (!pkg.license) problems.push('license is missing');
   if (!pkg.files?.includes('LICENSE')) problems.push('files does not list LICENSE');
   if (!pkg.files?.includes('README.md')) problems.push('files does not list README.md');
+  // A CommonJS main is what older resolvers (no exports support) load, and the
+  // top-level types is what they type it with: it must be the CommonJS types too.
+  const topTypes = pkg.types ?? pkg.typings;
+  if (/\.cjs$/.test(pkg.main ?? '') && topTypes !== undefined && !/\.d\.cts$/.test(topTypes)) {
+    problems.push('main points at CommonJS but the top-level types is not .d.cts');
+  }
   // Each exported JS entry (other than plain assets like CSS) must say where its types are.
   const walk = (key, value) => {
     if (typeof value === 'string') return;

@@ -359,9 +359,13 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
     // (iron-proxy serve) that is still running is left alone; the port is used
     // when this app next starts its own.
     if (settings.proxyPort !== prev.proxyPort) {
+      // A shared proxy that has gone away makes the recheck start this app's own
+      // proxy, already with the new settings: no need to start it a second time.
+      const hadServer = server !== undefined;
       await recheckProxy();
+      const justStarted = !hadServer && server !== undefined;
       await serialProxy(async () => {
-        if (quitting) return;
+        if (quitting || justStarted) return;
         if (server) {
           await stopOwnProxy();
           await startOwnProxy();

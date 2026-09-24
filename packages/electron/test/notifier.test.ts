@@ -635,6 +635,86 @@ describe('createNotifier', () => {
     n.dispose();
   });
 
+  it('shows a switch that follows a park released after the plain coalesceMs wait', async () => {
+    const src = fakeClient(profiles);
+    const { Notification, shown } = fakeNotificationClass();
+    const t = fakeClock();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      coalesceMs: 2_000,
+      maxHoldMs: 45_000,
+      throttleMs: 60_000,
+    });
+    // No request is waiting on another account: the park shows after coalesceMs.
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    await n.settled();
+    t.advance(2_000);
+    expect(shown.map((s) => s.title)).toEqual(['"Work Claude" is resting']);
+    // A switch away from that account well within throttleMs is news, and shows.
+    t.advance(10_000);
+    src.emit({
+      type: 'profile.switched',
+      provider: 'anthropic',
+      fromProfileId: 'a',
+      toProfileId: 'b',
+      reason: rateLimit,
+    });
+    await n.settled();
+    expect(shown.map((s) => s.title)).toEqual([
+      '"Work Claude" is resting',
+      'Switched to "Home Claude"',
+    ]);
+    n.dispose();
+  });
+
+  it('a park released at coalesceMs clears an earlier capped one for the same account', async () => {
+    const src = fakeClient(profiles);
+    const { Notification, shown } = fakeNotificationClass();
+    const t = fakeClock();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      coalesceMs: 2_000,
+      maxHoldMs: 45_000,
+      throttleMs: 60_000,
+    });
+    // First park: released by the maxHoldMs cap while a long stream runs on B.
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    src.emit({ type: 'request.started', requestId: 'r1', provider: 'anthropic', profileId: 'b' });
+    await n.settled();
+    t.advance(45_000);
+    src.emit({
+      type: 'request.finished',
+      requestId: 'r1',
+      provider: 'anthropic',
+      profileId: 'b',
+      durationMs: 45_000,
+    });
+    // A second park of the same account, released at coalesceMs (throttled as a
+    // repeat, but it is no longer the capped park the late switch belongs to).
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    await n.settled();
+    t.advance(2_000);
+    src.emit({
+      type: 'profile.switched',
+      provider: 'anthropic',
+      fromProfileId: 'a',
+      toProfileId: 'b',
+      reason: rateLimit,
+    });
+    await n.settled();
+    expect(shown.map((s) => s.title)).toEqual([
+      '"Work Claude" is resting',
+      'Switched to "Home Claude"',
+    ]);
+    n.dispose();
+  });
+
   it('keeps a late switch without a from account quiet too, and only once', async () => {
     const src = fakeClient(profiles);
     const { Notification, shown } = fakeNotificationClass();

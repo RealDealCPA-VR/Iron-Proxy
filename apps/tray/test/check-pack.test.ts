@@ -19,7 +19,7 @@ function goodManifest(): Record<string, unknown> {
     license: 'MIT',
     type: 'module',
     main: './dist/index.cjs',
-    types: './dist/index.d.ts',
+    types: './dist/index.d.cts',
     exports: {
       '.': {
         import: { types: './dist/index.d.ts', default: './dist/index.js' },
@@ -134,5 +134,24 @@ describe('check-pack', () => {
     expect(res.out).toContain('bugs is missing');
     expect(res.out).toContain('repository needs url and directory');
     expect(res.out).toContain('require points at CommonJS but its types are not .d.cts');
+  });
+
+  it('fails when a CommonJS main is paired with ESM top-level types', () => {
+    const pkg = goodManifest();
+    pkg.types = './dist/index.d.ts';
+    write(pkg);
+    const res = check();
+    expect(res.status).toBe(1);
+    expect(res.out).toContain('main points at CommonJS but the top-level types is not .d.cts');
+  });
+
+  it('accepts ESM top-level types when main is ESM', () => {
+    const pkg = goodManifest();
+    pkg.main = './dist/index.js';
+    pkg.types = './dist/index.d.ts';
+    write(pkg);
+    const res = check();
+    expect(res.out).not.toContain('top-level types');
+    expect(res.status).toBe(0);
   });
 });

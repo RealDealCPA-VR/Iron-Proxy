@@ -7,7 +7,7 @@
   "sideEffects": false,
   "main": "./dist/main.cjs",
   "module": "./dist/main.js",
-  "types": "./dist/main.d.ts",
+  "types": "./dist/main.d.cts",
   "exports": {
     ".": {
       "import": {

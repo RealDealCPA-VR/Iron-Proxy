@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /**
@@ -10,6 +10,10 @@ import { dirname } from 'node:path';
  * the exclusive `wx` flag: whoever creates it holds the lock. A holder that
  * crashed leaves it behind, so a lock older than `staleMs` is removed and taken
  * over. Every read-merge-write of a shared store runs inside it.
+ *
+ * Taking over a stale lock must not race another waiter doing the same: with a
+ * plain check-then-unlink, the second waiter deletes the lock the first one has
+ * just created and both run at once. See `takeOverStale`.
  */
 
 export interface FileLockOptions {
@@ -42,33 +46,20 @@ export async function withFileLock<T>(
   const lock = lockPathFor(path);
   const timeoutMs = opts.timeoutMs ?? LOCK_TIMEOUT_MS;
   const staleMs = opts.staleMs ?? LOCK_STALE_MS;
-  const token = `${process.pid}:${randomBytes(6).toString('hex')}`;
+  // Used in a file name too, so only characters every file system accepts.
+  const token = `${process.pid}-${randomBytes(6).toString('hex')}`;
   const started = Date.now();
   let delay = 5;
   await mkdir(dirname(lock), { recursive: true });
   for (;;) {
+    if (await createExclusive(lock, token)) break;
+    let stale: boolean;
     try {
-      const fh = await open(lock, 'wx', 0o600);
-      try {
-        await fh.writeFile(token, 'utf8');
-      } finally {
-        await fh.close();
-      }
-      break;
-    } catch (err) {
-      const c = code(err);
-      // EPERM/EACCES: Windows reports these while another process is deleting the file.
-      if (c !== 'EEXIST' && c !== 'EPERM' && c !== 'EACCES') throw err;
-    }
-    try {
-      const st = await stat(lock);
-      if (Date.now() - st.mtimeMs > staleMs) {
-        await unlink(lock).catch(() => {});
-        continue;
-      }
+      stale = Date.now() - (await stat(lock)).mtimeMs > staleMs;
     } catch {
       continue; // released between our open and stat: try again at once
     }
+    if (stale && (await takeOverStale(lock, token, staleMs))) continue;
     if (Date.now() - started >= timeoutMs) {
       throw new Error(`Timed out waiting for the lock on ${lock}`);
     }
@@ -83,6 +74,73 @@ export async function withFileLock<T>(
       if ((await readFile(lock, 'utf8')) === token) await unlink(lock);
     } catch {
       /* already gone */
+    }
+  }
+}
+
+/** Create `path` exclusively with `content`. False when it already exists. */
+async function createExclusive(path: string, content: string): Promise<boolean> {
+  try {
+    const fh = await open(path, 'wx', 0o600);
+    try {
+      await fh.writeFile(content, 'utf8');
+    } finally {
+      await fh.close();
+    }
+    return true;
+  } catch (err) {
+    const c = code(err);
+    // EPERM/EACCES: Windows reports these while another process is deleting the file.
+    if (c !== 'EEXIST' && c !== 'EPERM' && c !== 'EACCES') throw err;
+    return false;
+  }
+}
+
+/**
+ * Move a stale lock out of the way. Returns true when the caller should try to
+ * create the lock again at once, false when it should wait as for a live lock.
+ *
+ * Only the waiter holding `<file>.lock.takeover` may remove a stale lock, and it
+ * looks at the lock again once it holds it: nobody else removes a stale lock in
+ * the meantime, so nobody can have replaced it with a live one, and what it
+ * removes is the stale lock it has just seen. It renames the lock to a name only
+ * it uses (`<file>.lock.stale-<token>`), which frees the name at once even where
+ * Windows keeps a deleted file's name while someone has it open, then deletes
+ * that. A rename that finds nothing (ENOENT) means the lock went away: retry.
+ */
+async function takeOverStale(lock: string, token: string, staleMs: number): Promise<boolean> {
+  const guard = `${lock}.takeover`;
+  if (!(await createExclusive(guard, token))) {
+    // Another waiter is taking it over. A guard this old was left by a waiter
+    // that crashed in the middle of a takeover, which is all but impossible.
+    try {
+      if (Date.now() - (await stat(guard)).mtimeMs > staleMs) await unlink(guard);
+    } catch {
+      /* gone already */
+    }
+    return false;
+  }
+  try {
+    try {
+      if (Date.now() - (await stat(lock)).mtimeMs <= staleMs) return false; // taken over already
+    } catch {
+      return true; // gone: try again at once
+    }
+    const grave = `${lock}.stale-${token}`;
+    try {
+      await rename(lock, grave);
+    } catch (err) {
+      // ENOENT: gone after all. Anything else (Windows refuses to rename a file
+      // someone has open): wait, then look again.
+      return code(err) === 'ENOENT';
+    }
+    await unlink(grave).catch(() => {});
+    return true;
+  } finally {
+    try {
+      if ((await readFile(guard, 'utf8')) === token) await unlink(guard);
+    } catch {
+      /* gone already */
     }
   }
 }

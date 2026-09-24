@@ -345,8 +345,10 @@ interface PendingPark {
  * that switch arrives, the park is dropped and one "Switched to ..." shows. The
  * hold never exceeds `maxHoldMs` from the park, so an abandoned request cannot
  * swallow it. When a switch arrives after its park was already shown that way
- * (a stream longer than `maxHoldMs`), and that park was shown within
- * `throttleMs`, the switch is not shown: one notification per incident. A
+ * (released by the `maxHoldMs` cap: a stream longer than `maxHoldMs`), and that
+ * park was shown within `throttleMs`, the switch is not shown: one notification
+ * per incident. A park shown after the ordinary `coalesceMs` wait does not
+ * quiet a later switch, which then shows "Switched to ...". A
  * `provider.exhausted` for the provider also replaces its pending parks.
  */
 export function createNotifier(opts: CreateNotifierOptions): Notifier {
@@ -364,7 +366,12 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
   const parkedUntil = new Map<string, string>();
   const pending = new Map<string, PendingPark>();
   const lastShown = new Map<string, number>();
-  /** When each account's park notification was last shown, with its provider. */
+  /**
+   * When each account's park notification was last shown because it had waited
+   * `maxHoldMs` for a switch, with its provider. A park shown after the ordinary
+   * `coalesceMs` wait is not recorded: no switch was on its way then, so a later
+   * one is news.
+   */
   const parkShown = new Map<string, { at: number; provider: ProviderId | undefined }>();
 
   const listProfiles = (): Promise<Profile[]> =>
@@ -414,14 +421,21 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
     }
   }
 
-  function releasePark(p: PendingPark): void {
+  /** Show a held park. `capped`: released by the `maxHoldMs` ceiling, not the `coalesceMs` timer. */
+  function releasePark(p: PendingPark, capped: boolean): void {
     if (pending.get(p.event.profileId) !== p) return;
     dropPark(p);
-    if (show(notificationFor(p.event, ctx), p.event.profileId))
-      parkShown.set(p.event.profileId, { at: clock.now(), provider: p.provider });
+    const shown = show(notificationFor(p.event, ctx), p.event.profileId);
+    // The latest park of the account decides: one released at coalesceMs (shown
+    // or throttled) means a switch that follows is not the tail of a capped one.
+    if (!capped) parkShown.delete(p.event.profileId);
+    else if (shown) parkShown.set(p.event.profileId, { at: clock.now(), provider: p.provider });
   }
 
-  /** The account whose park was shown within throttleMs (for a switch that follows it late). */
+  /**
+   * The account whose park was released by the `maxHoldMs` cap within throttleMs
+   * (for a switch that follows it late).
+   */
   function recentlyShownPark(fromId: string | undefined, provider: ProviderId): string | undefined {
     const now = clock.now();
     const fresh = (id: string) => {
@@ -442,7 +456,7 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
     p.timer = clock.setTimeout(() => {
       p.timer = undefined;
       if (p.waitingOn.size) return;
-      releasePark(p);
+      releasePark(p, false);
     }, coalesceMs);
   }
 
@@ -511,7 +525,7 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
         armPark(p);
         p.ceiling = clock.setTimeout(() => {
           p.ceiling = undefined;
-          releasePark(p);
+          releasePark(p, true);
         }, maxHoldMs);
         return;
       }
@@ -553,9 +567,10 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
             replaced = true;
           }
         }
-        // The park was already shown (the answer on the next account took longer
-        // than maxHoldMs): the user has heard about this incident, so the late
-        // switch stays quiet while that park is within throttleMs.
+        // The park was already shown because the answer on the next account took
+        // longer than maxHoldMs: the user has heard about this incident, so the
+        // late switch stays quiet while that park is within throttleMs. A park
+        // shown after the plain coalesceMs wait does not quiet a later switch.
         if (!replaced) {
           const shownFor = recentlyShownPark(fromId, e.provider);
           if (shownFor !== undefined) {
