@@ -426,12 +426,9 @@ async function profiles(
         home,
         ...(typeof v.title === 'string' ? { title: v.title } : {}),
       });
-      // Check this one profile's sign-in (its own CLI's status command, nothing else).
-      const checked = await iron.refreshStatus(p.id).catch(() => []);
-      const st =
-        checked.find((x) => x.profileId === p.id)?.status ??
-        (await iron.allStates())[p.id]?.status ??
-        'unknown';
+      // adoptLogin already ran this one profile's status check (its own CLI, nothing
+      // else); read the state it stored rather than running the vendor CLI again.
+      const st = (await iron.allStates())[p.id]?.status ?? 'unknown';
       out(
         json
           ? JSON.stringify(p, null, 2)

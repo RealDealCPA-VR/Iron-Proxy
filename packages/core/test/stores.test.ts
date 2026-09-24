@@ -45,6 +45,23 @@ describe('profile stores', () => {
     };
     expect(raw.version).toBe(1);
   });
+  it('file store sees what another process wrote, and a later write keeps it', async () => {
+    // Two stores on one directory stand in for the tray app and the CLI.
+    const tray = new FileProfileStore(dir);
+    const cli = new FileProfileStore(dir);
+    await tray.put(profile('a', 0));
+    expect((await tray.list()).map((p) => p.id)).toEqual(['a']);
+    await cli.put(profile('b', 1));
+    expect((await tray.list()).map((p) => p.id).sort()).toEqual(['a', 'b']);
+    await tray.put({ ...profile('a', 0), title: 'Renamed' });
+    const onDisk = new FileProfileStore(dir);
+    expect((await onDisk.list()).map((p) => `${p.id}:${p.title}`).sort()).toEqual([
+      'a:Renamed',
+      'b:P b',
+    ]);
+    await cli.delete('b');
+    expect(await tray.get('b')).toBeUndefined();
+  });
 });
 
 describe('state stores', () => {
@@ -66,5 +83,22 @@ describe('state stores', () => {
     await s.flush();
     const s2 = new FileStateStore(dir);
     expect((await s2.get('a'))?.parkedUntil).toBe('2026-01-01T00:00:00.000Z');
+  });
+  it('file store sees a park another process recorded, but never over its own unsaved writes', async () => {
+    const tray = new FileStateStore(dir, { debounceMs: 10_000 });
+    const serve = new FileStateStore(dir, { debounceMs: 10_000 });
+    await tray.put({ profileId: 'a', status: 'ready', served: 0 });
+    await tray.flush();
+    expect((await tray.get('a'))?.status).toBe('ready');
+    await serve.put({ profileId: 'a', status: 'parked', served: 1, parkedUntil: 'x' });
+    await serve.flush();
+    expect((await tray.get('a'))?.status).toBe('parked');
+    // An unsaved write here wins over the file until it is flushed.
+    await tray.put({ profileId: 'b', status: 'ready', served: 0 });
+    await serve.put({ profileId: 'c', status: 'ready', served: 0 });
+    await serve.flush();
+    expect(Object.keys(await tray.all()).sort()).toEqual(['a', 'b']);
+    await tray.flush();
+    expect(Object.keys(await new FileStateStore(dir).all()).sort()).toEqual(['a', 'b']);
   });
 });

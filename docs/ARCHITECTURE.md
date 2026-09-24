@@ -71,18 +71,21 @@ A `CliSpec` is a small object: binary name, the env var for the home dir, the ar
   vault.json         AES-256-GCM entries, ref-bound AAD
   vault.key          master key; in Electron wrapped by safeStorage (DPAPI / Keychain / libsecret)
   cli-homes/<provider>/<profileId>/   isolated vendor CLI home per subscription account
-  proxy.json         written by `iron-proxy serve`: {url, token, pid}
+  proxy.json         written by `iron-proxy serve` or the tray app: {url, token, pid}; removed by its owner on exit
+  tray-settings.json the tray app's switches (notifications, start at login, proxy port); nothing secret
 ```
+
+Several processes can use one data directory at once (the CLI, a running `serve`, the tray app). The file profile and state stores notice when the file on disk is not the one they last read or wrote (inode, mtime and size) and re-read it, so an account added by one process is seen by the others and a later write does not drop it. The state store never re-reads over a write of its own that is still pending; for state the last writer wins, which is fine because it is safe to delete.
 
 An **adopted** profile (`cli.adopted: true`, from `adoptLogin`) points at a directory outside `cli-homes`: the vendor CLI's own default home, such as `~/.claude`. Iron-Proxy runs the CLI there exactly as it runs it in an isolated home, but never prepares, recreates or deletes that directory, and logging it out signs the user's own CLI out. `discoverLogins()` finds candidates through each spec's `defaultHome(env)` and the CLI's own status command.
 
 `pickProfile(provider)` answers "which account would a request use right now" without running one: it walks `Router.candidates()` through `Router.availability()`, the same check each request makes (expired parks cleared, parked and signed-out accounts skipped). `iron-proxy run` starts the vendor CLI interactively as that account with `CliLane.interactiveCommand()` (the lane's scrubbed environment), and `iron-proxy env` prints `CliLane.shellEnv()`; neither reads anything out of the home.
 
-Default `dataDir` is `~/.iron-proxy` (or `IRON_PROXY_DATA_DIR`). Electron hosts get `<userData>/iron-proxy`. Two apps that want to _share_ accounts point at the same `dataDir`; two that want isolation do not.
+Default `dataDir` is `~/.iron-proxy` (or `IRON_PROXY_DATA_DIR`). Electron hosts get `<userData>/iron-proxy`. Two apps that want to _share_ accounts point at the same `dataDir`; two that want isolation do not. The tray app (`apps/tray`) deliberately uses the CLI's `dataDir` and plain key protector, so the two share accounts both ways; it reuses a running `serve` found through `proxy.json` (pid checked with `process.kill(pid, 0)`) instead of starting a second server.
 
 ## Usage history
 
-The manager feeds a `UsageStore` from its own event stream and one router hook: every `request.finished` adds a request record (time, `durationMs`, the input / output / cache-read token counts the provider reported, when it reported them), every `profile.parked` adds a park (time, signal kind, `until`), and `Router.onUsage()` (called after each usage snapshot a lane reports is stored) adds a utilisation sample (time, `utilisation`, `resetAt`) when the snapshot carries a utilisation. No prompt text, output, secret, title or email is ever recorded. The file store prunes on write: records older than 14 days go, then the oldest records until at most 5000 remain per profile. Deleting a profile deletes its history.
+The manager feeds a `UsageStore` from its own event stream and one router hook: every `request.finished` adds a request record (time, `durationMs`, the input / output / cache-read token counts the provider reported, when it reported them), every `profile.parked` adds a park (time, signal kind, `until`), and `Router.onUsage()` (called after each usage snapshot a lane reports is stored) adds a utilisation sample (time, `utilisation`, `resetAt`) when the snapshot carries a utilisation. No prompt text, output, secret, title or email is ever recorded. The stores prune on write: every write drops records older than 14 days from every profile (so an idle profile ages out too), then trims the written profile's oldest records until at most 5000 remain. `UsageStore.flush()` is optional; `close()` calls it once the last usage write has landed. `usageReport()` and `close()` first await `Router.settleUsage()`, which resolves once every usage snapshot a lane has reported is stored and recorded, so a report taken right after a request (even one that failed after its headers carried usage) sees that request's sample. Deleting a profile deletes its history.
 
 `IronProxy.usageReport()` builds, per profile, requests and tokens for the last 1h / 5h / 24h / 7d, parks in the last 7 days and the last park time, the latest utilisation of the **current window** (samples sharing the latest sample's `resetAt` while that is still ahead, or, without a `resetAt`, samples from the last hour), and an estimate of the minutes left at this pace. The estimate is a least-squares line through the current window's samples: at least three samples and a positive slope, `minutesLeft = (1 - latest) / slopePerMinute`, capped at the minutes until `resetAt`; `confidence: 'medium'` with six or more samples spanning ten minutes or more, else `'low'`. With fewer samples, a flat or falling trend, or a stale window there is no estimate at all. It reads local history only; nothing is fetched to build it.
 
@@ -97,6 +100,7 @@ Every failure is an `IronProxyError` with a stable `code`, `retryable`, `details
 - **OAuth lane**: implement `Lane` with `kind: 'oauth'`, call `registry.addLane(provider, lane)`, create profiles with `lane: 'oauth', oauth: { extension: '<your name>' }`.
 - **Storage**: implement `ProfileStore`, `StateStore`, `UsageStore` or `Vault`. Memory versions ship for tests.
 - **Key protection**: implement `KeyProtector` (two functions). The Electron package ships the `safeStorage` one.
+- **Notifications**: `@iron-proxy/electron`'s `createNotifier` listens to the IronEvent stream and shows Electron notifications; `notificationFor(event, ctx)` is the pure event -> title/body mapping for hosts with their own notification UI. Titles and provider names only.
 
 ## What is deliberately not here
 

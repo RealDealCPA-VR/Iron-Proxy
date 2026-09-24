@@ -133,6 +133,26 @@ describe('profiles adopt <provider> without --home', () => {
     expect(ok.err()).toBe('');
   });
 
+  it('runs the vendor status check once per adopt, not twice', async () => {
+    const statusRuns = async (home: string) =>
+      (await readFile(join(home, 'invocations.log'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as string[])
+        .filter((args) => args[1] === 'status').length;
+    const out = io();
+    expect(await runCli(['profiles', 'adopt', 'openai'], out.io)).toBe(0);
+    expect(await statusRuns(join(user, '.codex'))).toBe(1);
+    // The state the one check stored still drives the output and the note.
+    expect(out.out()).toContain('unauthenticated');
+    expect(out.err()).toContain('is not signed in yet');
+
+    const ok = io();
+    expect(await runCli(['profiles', 'adopt', 'anthropic'], ok.io)).toBe(0);
+    expect(await statusRuns(join(user, '.claude'))).toBe(1);
+    expect(ok.out()).toContain('ready');
+  });
+
   it("fails clearly when that provider's default home does not exist", async () => {
     const r = io();
     expect(await runCli(['profiles', 'adopt', 'xai'], r.io)).toBe(1);

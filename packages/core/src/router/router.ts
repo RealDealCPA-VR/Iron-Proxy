@@ -85,35 +85,30 @@ export function isUsageHot(
 
 /**
  * The request that continues a cut-off answer: the original request plus the
- * partial text as an assistant turn. The Anthropic API lane continues an
- * assistant prefill natively (trailing whitespace trimmed, which it requires);
- * every other lane also gets a user turn asking it to carry on.
+ * partial text as an assistant turn. When the caller's request already ends with
+ * an assistant turn (a prefill), the partial text is added to that turn instead,
+ * so there are never two assistant turns in a row. The Anthropic API lane
+ * continues an assistant prefill natively (trailing whitespace trimmed, which it
+ * requires); every other lane also gets a user turn asking it to carry on.
  */
 export function continuationRequest(
   req: UnifiedRequest,
   partial: string,
   profile: Pick<Profile, 'provider' | 'lane'>,
 ): UnifiedRequest {
-  if (profile.provider === 'anthropic' && profile.lane === 'api-key') {
-    const text = partial.trimEnd();
-    const messages = [...req.messages];
-    const last = messages[messages.length - 1];
-    if (last?.role === 'assistant')
-      messages[messages.length - 1] = {
-        ...last,
-        content: [...last.content, { type: 'text', text }],
-      };
-    else messages.push({ role: 'assistant', content: [{ type: 'text', text }] });
-    return { ...req, messages };
-  }
-  return {
-    ...req,
-    messages: [
-      ...req.messages,
-      { role: 'assistant', content: [{ type: 'text', text: partial }] },
-      { role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] },
-    ],
-  };
+  const native = profile.provider === 'anthropic' && profile.lane === 'api-key';
+  const text = native ? partial.trimEnd() : partial;
+  const messages = [...req.messages];
+  const last = messages[messages.length - 1];
+  if (last?.role === 'assistant')
+    messages[messages.length - 1] = {
+      ...last,
+      content: [...last.content, { type: 'text', text }],
+    };
+  else messages.push({ role: 'assistant', content: [{ type: 'text', text }] });
+  if (!native)
+    messages.push({ role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] });
+  return { ...req, messages };
 }
 
 function streamInterrupted(profile: Profile, signal: QuotaSignal): IronProxyError {
@@ -598,6 +593,14 @@ export class Router {
   }
 
   /** Queue a usage write behind any earlier one for the same profile. */
+  /**
+   * Resolves once every usage snapshot reported so far has been stored and its
+   * onUsage listeners have run, including writes queued while waiting.
+   */
+  async settleUsage(): Promise<void> {
+    while (this.usageWrites.size) await Promise.all([...this.usageWrites.values()]);
+  }
+
   private reportUsage(profileId: string, usage: UsageSnapshot): void {
     const prev = this.usageWrites.get(profileId) ?? Promise.resolve();
     const next = prev.then(() => this.recordUsage(profileId, usage)).catch(() => {});

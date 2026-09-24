@@ -27,12 +27,14 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] Manager facade: profile CRUD, reorder/activate, API-key set, login/logout/refresh, unpark, models, doctor, close.
 - [x] `IronClient` contract + `LocalIronClient`.
 - [x] 99 tests incl. a fake vendor CLI exercising all four flavours through the real spawn path.
-- [x] Switch before the wall: accounts whose fresh usage is at or above `preemptAtUtilisation` (default 95%) go last for the request, nothing parked; `profile.switched` reason with `source: 'usage'`.
+- [x] Switch before the wall: accounts whose fresh usage is at or above `preemptAtUtilisation` (default 95%) go last for the request, nothing parked; `profile.switched` reason with `source: 'usage'`. Applies to lanes that report a usage window (today the API-key lanes, from rate-limit headers).
+- [ ] Pre-emptive switching for subscription (CLI) accounts, once a vendor CLI reports its usage window in its own output (no polling, no reading its credential files).
 - [x] Opt-in resume of a stream cut off mid-answer (`resumeInterrupted`, `x-iron-resume: 1`, `chat --resume`): the next account continues from the partial text; Anthropic API gets a trimmed assistant prefill.
 - [ ] Multi-turn for the CLI lane via Claude's `--input-format stream-json` and Codex `exec resume`, instead of transcript flattening.
 - [ ] Optional cheap liveness probe when a park expires (opt-in; default stays "no background probing").
 - [ ] Per-profile concurrency limit and request queue.
 - [x] Usage history per profile (`UsageStore`, `<dataDir>/usage.json`, 14 days / 5000 records, counts only): requests and tokens for 1h / 5h / 24h / 7d, parks this week, and a time-left estimate from the utilisation trend (`IronProxy.usageReport()`).
+- [x] File profile and state stores re-read a file another process changed (the CLI, a running `serve` and the tray app share one data directory); a pending state write is never overwritten by a re-read.
 - [ ] Usage accounting per profile per window surfaced in `ProfileState.usage` even for providers without headers (the history counts requests and tokens; it does not know the plan's limits).
 - [ ] Time-left estimate from token burn for providers that report no utilisation.
 - [x] Adopt existing logins: `discoverLogins()` finds a signed-in `~/.claude`, `~/.codex`, `~/.grok` (or their home variables) via the CLI's own status command, and `adoptLogin()` uses that directory in place (`cli.adopted`), never copying or deleting it.
@@ -55,6 +57,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] `createElectronIronProxy` (userData dir, `safeStorage` key protector), `installIronProxy` IPC dispatcher with method whitelist, preload `exposeIronProxy`, renderer `getIronClient`, `openLoginTerminal` for win32/darwin/linux.
 - [x] The bridge carries `discoverLogins` / `adoptLogin`, and `IronBridgeError.hint`.
 - [x] The bridge carries `usageReport`.
+- [x] Desktop notifications: `createNotifier({ iron | client, Notification })` for automatic switches, parked and exhausted accounts and sign-ins, with park -> switch coalescing, a per-account throttle and per-kind settings; the pure `notificationFor(event, ctx)` for custom UI.
 - [ ] Auto-start and supervise the proxy as a child process from Electron (for hosts that want SDK compatibility inside the app).
 - [ ] Deep-link return from browser login for CLIs that support a custom callback.
 
@@ -76,6 +79,18 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] `usage [--json] [--profile id]`: requests and tokens for 5h / 24h / 7d, parks this week, `about N min left at this pace`.
 - [ ] Shell completions.
 - [ ] `iron-proxy export/import` for moving profiles (never secrets) between machines.
+
+## 5b. Tray app (`apps/tray`, private)
+
+- [x] A ready-made Electron tray app for non-developers: one section per provider with a radio on the account serving next (click = activate), `parked until 3:40 PM` / `needs login` suffixes, tooltip `Iron-Proxy: Claude on "Work Claude Max"`, copy OpenAI / Anthropic base URLs, notifications submenu, start at login, quit.
+- [x] Shares the CLI's data directory (`IRON_PROXY_DATA_DIR` or `~/.iron-proxy`) and file vault; watches `profiles.json` / `state.json` so accounts and parks written by the CLI or a running `serve` show up.
+- [x] Starts the local proxy on 127.0.0.1:8791 (a setting; a free port when taken), writes and removes `proxy.json` like `serve`, and reuses a live `serve` instead of starting a second server.
+- [x] Window (420x640, hidden on close) with the proxy URL, `<AccountSwitcher>` with terminal login through a checked IPC channel, the usage panel, and settings.
+- [x] Pure, tested menu / settings / proxy-decision logic; the main-process wiring tested end to end with fake Electron modules; icons drawn by a zero-dependency script.
+- [ ] Installers (Windows, macOS, Linux) built in the release workflow.
+- [ ] Code signing and notarisation.
+- [ ] Auto-update.
+- [ ] Optional OS-keychain protection of the shared vault key that the CLI can also unlock.
 
 ## 6. Verification against real accounts
 

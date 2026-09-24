@@ -36,6 +36,46 @@ importers:
         specifier: ^3.0.5
         version: 3.2.7(@types/node@22.20.4)(jsdom@26.1.0)
 
+  apps/tray:
+    dependencies:
+      '@iron-proxy/core':
+        specifier: workspace:^
+        version: link:../../packages/core
+      '@iron-proxy/electron':
+        specifier: workspace:^
+        version: link:../../packages/electron
+      '@iron-proxy/proxy':
+        specifier: workspace:^
+        version: link:../../packages/proxy
+      '@iron-proxy/react':
+        specifier: workspace:^
+        version: link:../../packages/react
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@testing-library/react':
+        specifier: ^16.2.0
+        version: 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@types/react':
+        specifier: ^18.3.18
+        version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.3.5
+        version: 18.3.7(@types/react@18.3.31)
+      electron:
+        specifier: ^33.0.0
+        version: 33.4.11
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      jsdom:
+        specifier: ^26.0.0
+        version: 26.1.0
+
   examples/electron-host:
     dependencies:
       '@iron-proxy/core':

@@ -10,6 +10,7 @@ import {
   MemoryUsageStore,
   USAGE_MAX_AGE_MS,
   USAGE_MAX_RECORDS,
+  type UsageStore,
 } from '../src/store/usage-store.js';
 import { buildUsageReport, estimateTimeLeft } from '../src/usage/report.js';
 import type { UsageSampleRecord } from '../src/types.js';
@@ -71,6 +72,39 @@ describe('usage store bounds', () => {
     expect(hx.samples).toEqual([]);
     expect(hx.requests.map((r) => r.durationMs)).toEqual([1, 2]);
     expect(hx.parks).toHaveLength(1);
+  });
+
+  it('prunes every profile by age on write, so an idle profile ages out too', async () => {
+    const clock = { t: T0, now: () => clock.t };
+    const store = new MemoryUsageStore({ clock });
+    await store.addRequest('idle', { at: iso(T0), durationMs: 1 });
+    await store.addPark('idle', { at: iso(T0), kind: 'rate-limit' });
+    await store.addSample('idle', { at: iso(T0), utilisation: 0.3 });
+    await store.addRequest('idle', { at: iso(T0 + 2 * DAY), durationMs: 2 });
+    clock.t = T0 + DAY * 14 + MIN; // the T0 records are now just over 14 days old
+    await store.addRequest('busy', { at: iso(clock.t), durationMs: 9 });
+    const idle = await store.history('idle');
+    expect(idle.requests.map((r) => r.durationMs)).toEqual([2]); // the younger one stays
+    expect(idle.parks).toEqual([]);
+    expect(idle.samples).toEqual([]);
+    // Other profiles are only aged out, never trimmed to the written profile's budget.
+    const small = new MemoryUsageStore({ clock, maxRecordsPerProfile: 1 });
+    await small.addRequest('x', { at: iso(clock.t), durationMs: 1 });
+    await small.addRequest('y', { at: iso(clock.t), durationMs: 1 });
+    await small.addRequest('y', { at: iso(clock.t), durationMs: 2 });
+    expect((await small.history('x')).requests).toHaveLength(1);
+    expect((await small.history('y')).requests.map((r) => r.durationMs)).toEqual([2]);
+
+    // The file store writes the aged-out idle profile too.
+    const file = new FileUsageStore(dir, { clock: { now: () => T0 }, debounceMs: 10_000 });
+    await file.addRequest('idle', { at: iso(T0), durationMs: 1 });
+    await file.flush();
+    const later = new FileUsageStore(dir, { clock, debounceMs: 10_000 });
+    await later.addRequest('busy', { at: iso(clock.t), durationMs: 9 });
+    await later.flush();
+    const onDisk = JSON.parse(await readFile(later.path, 'utf8'));
+    expect(onDisk.profiles.idle.requests).toEqual([]);
+    expect(onDisk.profiles.busy.requests).toHaveLength(1);
   });
 
   it('FileUsageStore writes usage.json atomically after a debounce, reloads it, and survives a corrupt file', async () => {
@@ -359,5 +393,131 @@ describe('IronProxy usage history, end to end through the real router', () => {
     await iron.close();
     iron = undefined;
     await expect(stat(join(dir, 'usage.json'))).rejects.toThrow();
+  });
+
+  it('usageReport waits for usage the router is still storing, even after a failed request', async () => {
+    const clock = { t: T0, now: () => clock.t };
+    const reset = iso(T0 + 5 * HOUR);
+    let calls = 0;
+    // A 400 still carries rate-limit headers: the lane reports the usage, then the
+    // request fails without the router waiting for that write.
+    const fetch: typeof globalThis.fetch = async () => {
+      calls++;
+      const headers = {
+        'content-type': 'application/json',
+        'anthropic-ratelimit-requests-limit': '100',
+        'anthropic-ratelimit-requests-remaining': String(100 - calls * 10),
+        'anthropic-ratelimit-requests-reset': reset,
+      };
+      if (calls === 2)
+        return new Response('{"type":"error","error":{"type":"invalid_request_error"}}', {
+          status: 400,
+          headers,
+        });
+      return new Response(
+        JSON.stringify({
+          id: 'msg',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-x',
+          content: [{ type: 'text', text: 'ok' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers },
+      );
+    };
+    /** A state store whose writes land late, like a slow disk. */
+    class SlowStateStore extends MemoryStateStore {
+      override async put(state: Parameters<MemoryStateStore['put']>[0]): Promise<void> {
+        await new Promise((r) => setTimeout(r, 40));
+        await super.put(state);
+      }
+    }
+    iron = createIronProxy({
+      dataDir: dir,
+      profiles: new MemoryProfileStore(),
+      states: new SlowStateStore(),
+      vault: new MemoryVault(),
+      usage: new MemoryUsageStore({ clock }),
+      clock,
+      fetch,
+      policy: { overloadRetries: 0 },
+    });
+    const p = await iron.createProfile({
+      title: 'Work',
+      provider: 'anthropic',
+      lane: 'api-key',
+      apiKeySecret: 'key-A',
+    });
+    const req = {
+      model: 'claude-x',
+      messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }],
+    };
+    await iron.complete(req);
+    expect((await iron.usageReport())[0]?.utilisation).toBeCloseTo(0.1);
+    await expect(iron.complete(req)).rejects.toThrow(/HTTP 400/);
+    // Right away: the second sample is still on its way through the slow store.
+    const [r] = await iron.usageReport();
+    expect(r?.profileId).toBe(p.id);
+    expect(r?.utilisation).toBeCloseTo(0.2);
+    expect(r?.resetAt).toBe(reset);
+    expect((await iron.usage.history(p.id)).samples).toHaveLength(2);
+  });
+
+  it('close() calls the UsageStore flush after the last usage write has landed', async () => {
+    const clock = { t: T0, now: () => clock.t };
+    const inner = new MemoryUsageStore({ clock });
+    const flushed: number[] = [];
+    // A plain object typed as UsageStore: `flush` is part of the interface.
+    const usage: UsageStore = {
+      addRequest: (id, r) => inner.addRequest(id, r),
+      addPark: (id, r) => inner.addPark(id, r),
+      addSample: async (id, r) => {
+        await new Promise((res) => setTimeout(res, 20));
+        await inner.addSample(id, r);
+      },
+      history: (id) => inner.history(id),
+      all: () => inner.all(),
+      delete: (id) => inner.delete(id),
+      flush: async () => {
+        const all = await inner.all();
+        flushed.push(Object.values(all).reduce((n, h) => n + h.samples.length, 0));
+      },
+    };
+    const fetch: typeof globalThis.fetch = async () =>
+      new Response('{"type":"error","error":{"type":"invalid_request_error"}}', {
+        status: 400,
+        headers: {
+          'anthropic-ratelimit-requests-limit': '100',
+          'anthropic-ratelimit-requests-remaining': '50',
+          'anthropic-ratelimit-requests-reset': iso(T0 + HOUR),
+        },
+      });
+    iron = createIronProxy({
+      dataDir: dir,
+      profiles: new MemoryProfileStore(),
+      states: new MemoryStateStore(),
+      vault: new MemoryVault(),
+      usage,
+      clock,
+      fetch,
+      policy: { overloadRetries: 0 },
+    });
+    await iron.createProfile({
+      title: 'X',
+      provider: 'anthropic',
+      lane: 'api-key',
+      apiKeySecret: 'k',
+    });
+    await expect(
+      iron.complete({
+        model: 'claude-x',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      }),
+    ).rejects.toThrow(/HTTP 400/);
+    await iron.close();
+    iron = undefined;
+    expect(flushed).toEqual([1]);
   });
 });

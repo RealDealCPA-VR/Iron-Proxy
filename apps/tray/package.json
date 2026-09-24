@@ -1,0 +1,34 @@
+{
+  "name": "@iron-proxy/tray",
+  "productName": "Iron-Proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Iron-Proxy as a ready-made desktop app: account switching for every tool from the system tray, sharing its accounts with the iron-proxy CLI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "out/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "electron-install": "node -e \"delete process.env.ELECTRON_SKIP_BINARY_DOWNLOAD; require('electron/install.js')\"",
+    "start": "node scripts/build.mjs && electron ."
+  },
+  "dependencies": {
+    "@iron-proxy/core": "workspace:^",
+    "@iron-proxy/electron": "workspace:^",
+    "@iron-proxy/proxy": "workspace:^",
+    "@iron-proxy/react": "workspace:^",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.2.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "electron": "^33.0.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}

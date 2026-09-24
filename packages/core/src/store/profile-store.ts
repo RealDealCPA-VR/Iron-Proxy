@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Profile } from '../types.js';
 import { readJsonFile, writeJsonFileAtomic } from '../util.js';
@@ -38,20 +39,39 @@ interface ProfilesFile {
 /**
  * JSON file store: `<dataDir>/profiles.json`. Writes are atomic and serialised
  * through a promise chain so concurrent puts never interleave.
+ *
+ * The file is shared by every process on the same data directory (the CLI, a
+ * running `serve`, the tray app), so the cache is re-read whenever the file on
+ * disk is no longer the one this store last read or wrote: an account another
+ * process added is seen, and a later write here does not drop it.
  */
 export class FileProfileStore implements ProfileStore {
   readonly path: string;
   private chain: Promise<unknown> = Promise.resolve();
   private cache: Map<string, Profile> | undefined;
+  /** Identity of the file the cache came from (or was last written to). */
+  private seen: string | undefined;
 
   constructor(dataDir: string) {
     this.path = join(dataDir, 'profiles.json');
   }
 
+  /** Changes on every atomic replace: a rename gives a new inode, and mtime/size move with edits. */
+  private async fingerprint(): Promise<string> {
+    try {
+      const st = await stat(this.path);
+      return `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      return 'missing';
+    }
+  }
+
   private async load(): Promise<Map<string, Profile>> {
-    if (this.cache) return this.cache;
+    const fp = await this.fingerprint();
+    if (this.cache && fp === this.seen) return this.cache;
     const file = await readJsonFile<ProfilesFile>(this.path, { version: 1, profiles: [] });
     this.cache = new Map(file.profiles.map((p) => [p.id, p]));
+    this.seen = fp;
     return this.cache;
   }
 
@@ -59,6 +79,7 @@ export class FileProfileStore implements ProfileStore {
     const map = await this.load();
     const file: ProfilesFile = { version: 1, profiles: [...map.values()] };
     await writeJsonFileAtomic(this.path, file);
+    this.seen = await this.fingerprint();
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {

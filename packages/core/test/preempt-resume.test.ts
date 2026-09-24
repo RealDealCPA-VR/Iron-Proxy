@@ -539,4 +539,46 @@ describe('resume after a mid-stream limit', () => {
     ]);
     expect(base.messages[1]?.content).toHaveLength(1); // the original is not mutated
   });
+
+  it('merges the partial text into a caller prefill on a non-Anthropic lane, then asks it to continue', async () => {
+    const prefilled: UnifiedRequest = {
+      model: 'gpt-x',
+      messages: [
+        ...req('gpt-x').messages,
+        { role: 'assistant', content: [{ type: 'text', text: 'Sure:' }] },
+      ],
+    };
+    const { router, script } = setup(
+      { a: [{ texts: [' one ', 'two '], cut: true }], b: [{ texts: ['three.'] }] },
+      [mk('a', 0, 'openai'), mk('b', 1, 'openai')],
+    );
+    const evs = await collect(router.stream(prefilled, { resumeInterrupted: true }));
+    expect(textOf(evs)).toBe(' one two three.');
+    const cont = script.requests.find((r) => r.profileId === 'b')!.req;
+    // One assistant turn (the caller's prefill plus the partial), never two in a row.
+    expect(cont.messages).toEqual([
+      ...req('gpt-x').messages,
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Sure:' },
+          { type: 'text', text: ' one two ' },
+        ],
+      },
+      { role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] },
+    ]);
+    for (let i = 1; i < cont.messages.length; i++)
+      expect(
+        cont.messages[i]!.role === 'assistant' && cont.messages[i - 1]!.role === 'assistant',
+      ).toBe(false);
+    expect(prefilled.messages).toHaveLength(2); // the caller's request is not mutated
+
+    // The Anthropic CLI lane (not the API) is merged the same way.
+    const cli = continuationRequest(prefilled, 'x ', { provider: 'anthropic', lane: 'cli' });
+    expect(cli.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(cli.messages[1]?.content).toEqual([
+      { type: 'text', text: 'Sure:' },
+      { type: 'text', text: 'x ' },
+    ]);
+  });
 });

@@ -14,7 +14,7 @@
  * The home dir is read from the flavor's env var (CLAUDE_CONFIG_DIR, CODEX_HOME,
  * GROK_HOME, GEMINI_CLI_HOME). `login` creates the marker; `logout` removes it.
  */
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Without FAKE_CLI_FLAVOR the flavor follows the home variable that is set, so
@@ -54,6 +54,9 @@ writeFileSync(
     env: { [homeEnv]: home, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null },
   }),
 );
+
+// And append it to a log so tests can count how often the CLI was run.
+appendFileSync(join(home, 'invocations.log'), `${JSON.stringify(args)}\n`);
 
 // `echo-run [--exit N] ...`: stands in for an interactive session started by
 // `iron-proxy run`. Reports what it was started with, then exits with N.

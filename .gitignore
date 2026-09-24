@@ -11,4 +11,5 @@ Thumbs.db
 # runtime data created by local runs / examples
 .iron-proxy/
 examples/**/out/
+apps/**/out/
 packages/react/src/styles.generated.ts

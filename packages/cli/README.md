@@ -29,6 +29,6 @@ npx iron-proxy env anthropic --shell bash           # lines that make your own s
 
 `usage [--json] [--profile id]` prints one row per account: title, provider, requests and tokens for the last 5h / 24h / 7d, parks this week, and `about N min left at this pace` when at least three utilisation readings of the current window show a rising trend (`(rough)` until there are six spanning ten minutes). It reads the local history in `<dataDir>/usage.json` only; `--json` prints the raw reports.
 
-`profiles adopt <provider>` checks the adopted login's sign-in with that CLI's own status command (only that one) and, when it is signed out, prints `Note: "<title>" is not signed in yet: iron-proxy login <id>` on stderr.
+`profiles adopt <provider>` checks the adopted login's sign-in with that CLI's own status command (only that one, run once) and, when it is signed out, prints `Note: "<title>" is not signed in yet: iron-proxy login <id>` on stderr.
 
 Errors print as `CODE: message` followed by a `hint: …` line saying what to do next. `logout` on an adopted profile notes that it signed your own CLI out too, since it is the same login. Removing an adopted profile never deletes its directory.

@@ -5,3 +5,4 @@ pnpm-lock.yaml
 CHANGELOG.md
 styles.generated.ts
 examples/**/out
+apps/**/out

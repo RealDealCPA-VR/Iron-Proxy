@@ -783,6 +783,8 @@ export class IronProxy {
     const targets = opts.profileId
       ? [await this.getProfile(opts.profileId)]
       : await this.listProfiles();
+    // Snapshots a lane reported are stored by the router first, then recorded here.
+    await this.router.settleUsage();
     await Promise.all([...this.usageWrites]);
     const now = this.clock.now();
     return Promise.all(
@@ -836,14 +838,18 @@ export class IronProxy {
     );
   }
 
-  /** Flush debounced state and cancel logins. Call on app quit. */
+  /**
+   * Cancel logins, wait for usage still being stored, then flush debounced state
+   * and the usage store (`UsageStore.flush`, when it has one). Call on app quit.
+   */
   async close(): Promise<void> {
     for (const s of this.logins.values()) s.cancel();
     this.logins.clear();
+    // Let usage the router is still storing reach the history before unsubscribing.
+    await this.router.settleUsage();
     for (const off of this.usageOff.splice(0)) off();
     await Promise.all([...this.usageWrites]);
-    const usage = this.usage as UsageStore & { flush?: () => Promise<void> };
-    if (typeof usage.flush === 'function') await usage.flush().catch(() => {});
+    await this.usage.flush?.().catch(() => {});
     if (this.states instanceof FileStateStore) await this.states.flush();
     this.events.removeAll();
   }

@@ -26,10 +26,10 @@ createIronProxy({
 
 Two more policy fields shape behaviour rather than timing, and can be overridden per provider the same way:
 
-| Field                  | Default | Effect                                                                                               |
-| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `preemptAtUtilisation` | `0.95`  | Try a nearly-full account last (see [Switch before the wall](#switch-before-the-wall)). `>= 1`: off. |
-| `resumeInterrupted`    | `false` | Continue a stream cut off mid-answer on the next account (see [Streaming](#streaming)).              |
+| Field                  | Default | Effect                                                                                                                                     |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `preemptAtUtilisation` | `0.95`  | Try a nearly-full account last, for lanes that report a usage window (see [Switch before the wall](#switch-before-the-wall)). `>= 1`: off. |
+| `resumeInterrupted`    | `false` | Continue a stream cut off mid-answer on the next account (see [Streaming](#streaming)).                                                    |
 
 ## Selection algorithm
 
@@ -51,7 +51,7 @@ Because parks are cleared lazily on the next selection, no timers run in the bac
 
 ## Switch before the wall
 
-Accounts report usage as they serve (rate-limit headers on the API lanes, usage hints from a CLI), and the router keeps the latest snapshot in `ProfileState.usage`. A candidate is **hot** when that snapshot says at least `preemptAtUtilisation` of the window is used (`utilisation >= 0.95` by default) **and** its `resetAt` is still in the future. For that request, hot candidates move to the end of the order, keeping their relative order. Nothing is parked and nothing is written: the next request looks again, and once the window resets the account is first again.
+Pre-emption applies to accounts whose lane reports a usage window as it serves. Today those are the **API-key lanes**, which read the window from the provider's rate-limit headers; the router keeps the latest snapshot in `ProfileState.usage`. Subscription (CLI) lanes report token counts but no usage window, so a subscription account is never pre-empted: it switches when the vendor CLI says the limit is hit, as a normal quota signal. A candidate is **hot** when that snapshot says at least `preemptAtUtilisation` of the window is used (`utilisation >= 0.95` by default) **and** its `resetAt` is still in the future. For that request, hot candidates move to the end of the order, keeping their relative order. Nothing is parked and nothing is written: the next request looks again, and once the window resets the account is first again.
 
 - Usage whose `resetAt` has passed is stale and ignored. Usage without a `resetAt` never makes an account hot, and is treated as stale once it is more than ten minutes old.
 - If every candidate is hot, the normal order is used. Pre-emption reorders; it never refuses a request.

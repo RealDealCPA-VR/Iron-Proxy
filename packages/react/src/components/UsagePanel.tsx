@@ -4,6 +4,7 @@ import { useUsageReport } from '../hooks/useUsageReport.js';
 import { useInjectedStyles } from '../inject-styles.js';
 import { defaultLabels, interpolate, type Labels } from '../labels.js';
 import { formatCount, PROVIDER_SHORT } from '../util.js';
+import { ErrorBanner } from './bits.jsx';
 import { SwitcherContext } from './context.js';
 
 export interface UsagePanelProps {
@@ -111,7 +112,8 @@ export function UsagePanel({
           <span className="iron-spinner" aria-hidden /> {labels.usageLoading}
         </div>
       ) : null}
-      {!view.loading && !reports.length ? (
+      {view.error ? <ErrorBanner error={view.error} labels={labels} /> : null}
+      {!view.loading && !view.error && !reports.length ? (
         <div className="iron-empty">{labels.usageEmpty}</div>
       ) : null}
       {reports.map((r) => (

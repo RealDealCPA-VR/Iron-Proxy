@@ -18,14 +18,22 @@ Iron-Proxy makes that a non-event. Give your app a list of titled accounts per p
 
 ---
 
+## For everyone: the tray app
+
+Not a developer? [`apps/tray`](apps/tray) is Iron-Proxy as a small desktop app. It lives in the system tray (the menu bar on macOS) and shows each provider's accounts with a mark on the one in use; click another to switch. It tells you when an account is resting and when it comes back (`Work Claude Max (parked until 3:40 PM)`), sends a desktop notification when it switches for you, and copies the two base URLs (`http://127.0.0.1:8791/v1` for OpenAI-style tools, `http://127.0.0.1:8791` for Anthropic-style ones) so any tool can use your accounts. Its window is the full account switcher: add accounts, sign in, reorder, see usage.
+
+It shares its accounts with the `iron-proxy` command line (the same `~/.iron-proxy` folder), so you can mix the two freely.
+
+To be honest about where it stands: there are no installers yet. They come in the next release step. Today you run it from a checkout with `pnpm -F @iron-proxy/tray start`, which needs the Electron binary (see [apps/tray/README.md](apps/tray/README.md)).
+
 ## Why people want this
 
 - **Stop rationing.** Two accounts of a provider are two windows. Three are three. Iron-Proxy uses the one that is ready and remembers when the others come back.
 - **Bring your own subscription, honestly.** The subscription lane drives the vendor's _official_ CLI (`claude`, `codex`, `grok`, `gemini`), each account in its own isolated home directory. Sign-in is the vendor's sign-in. No scraped tokens, no home-brewed OAuth against a consumer plan, nothing for a vendor to object to.
 - **Any app, any language.** Use it as a TypeScript library, or run the local proxy and point the OpenAI SDK or the Anthropic SDK at `http://127.0.0.1:8791`. Python, Rust, Go, a shell script: if it can speak OpenAI or Anthropic wire format, it gets account switching for free.
 - **A finished switcher UI, not a TODO.** `<AccountSwitcher />` ships styled, accessible, light and dark: add, title, reorder, toggle, log in with the link and code right in the panel, watch usage bars and parked countdowns. Ten lines in an Electron app.
-- **Switch before the wall, finish the sentence.** An account whose window is 95% used is tried last until it resets, so requests move on before they fail. Opt in to `resumeInterrupted` (`x-iron-resume: 1`, `chat --resume`) and an answer cut off by a limit mid-stream is continued by your next account of that provider.
-- **Know how long you have.** Iron-Proxy keeps a small local history (counts and times only, never prompts or output): requests and tokens per account for the last 5 hours, 24 hours and 7 days, parks this week, and, once a few usage readings show the trend, "about 40 min left at this pace". `iron-proxy usage`, `IronProxy.usageReport()`, `GET /iron/usage`, or the **Usage** button in the switcher.
+- **Switch before the wall, finish the sentence.** An API-key account whose rate-limit window is 95% used (read from the provider's rate-limit headers) is tried last until it resets, so requests move on before they fail. Subscription (CLI) accounts report no usage window, so they switch when the vendor CLI says the limit is hit. Opt in to `resumeInterrupted` (`x-iron-resume: 1`, `chat --resume`) and an answer cut off by a limit mid-stream is continued by your next account of that provider.
+- **Know how long you have.** Iron-Proxy keeps a small local history (counts and times only, never prompts or output): requests and tokens per account for the last 5 hours, 24 hours and 7 days, parks this week, and, once a few usage readings show the trend (API-key accounts, from rate-limit headers), "about 40 min left at this pace". `iron-proxy usage`, `IronProxy.usageReport()`, `GET /iron/usage`, or the **Usage** button in the switcher.
 - **Your data stays with the provider you chose.** Failover is same-provider only. A Claude request never lands at OpenAI because a limit was hit. When every account of a provider is parked, your app is told, with the earliest reset time, and _you_ decide.
 - **Secrets done properly.** API keys live in an AES-256-GCM vault whose master key is wrapped by the OS keychain in Electron (DPAPI, Keychain, libsecret). No passphrase prompts. Click and continue.
 
@@ -142,9 +150,10 @@ Map of the whole thing: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Repository
 
 ```
-packages/core      engine (zero deps)          packages/electron  main + preload + keychain protector
+packages/core      engine (zero deps)          packages/electron  main + preload + keychain protector + notifications
 packages/proxy     local HTTP server + client  packages/react     hook + styled AccountSwitcher
 packages/cli       `iron-proxy` binary         examples/electron-host  minimal wired app
+apps/tray          the desktop tray app (private, not on npm)
 docs/              architecture, adopting, providers, failover, roadmap
 ```
 

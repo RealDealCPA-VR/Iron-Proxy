@@ -58,6 +58,16 @@ export function Settings() {
 }
 ```
 
+**Optional: desktop notifications** (in main.ts, after `createElectronIronProxy`)
+
+```ts
+import { Notification } from 'electron';
+import { createNotifier } from '@iron-proxy/electron';
+const notifier = createNotifier({ iron, Notification }); // notifier.setSettings({ kinds: { login: false } }) / notifier.dispose()
+```
+
+The user hears about an automatic switch (`Switched to "Home Claude"` / `"Work Claude" hit its limit. Back at 3:40 PM.`), an account parked with no other account to take over, every account of a provider resting, and a sign-in that finished or failed. A park followed by its switch is one notification (a park is held at most `maxHoldMs`, 45 s, waiting for it); the same notification for the same account shows at most once a minute (`throttleMs`); the user's own switch is silent. The text holds titles and provider names only, never emails, ids or vendor messages. `setSettings({ enabled: false })` turns it off; `kinds: { switched, parked, exhausted, login }` turn off one kind.
+
 That is the whole integration. Users add accounts, title them, order them, sign in through the vendor's own flow, and your `iron.complete` / `iron.stream` calls fail over between them.
 
 ## 2. Any app, via the local proxy
@@ -114,7 +124,8 @@ Everything the UI does is a method on `iron` (`createProfile`, `login`, `activat
 ## Choosing a dataDir
 
 - Per-app isolation: your own directory (Electron: `<userData>/iron-proxy`).
-- Shared accounts across your tools: `~/.iron-proxy` (the default) or `IRON_PROXY_DATA_DIR`.
+- Shared accounts across your tools: `~/.iron-proxy` (the default) or `IRON_PROXY_DATA_DIR`. The `iron-proxy` CLI and the tray app (`apps/tray`) both use it, and several processes on one directory see each other's changes.
+- Just want account switching for the tools you already use, without writing code? That is the tray app: see [apps/tray/README.md](../apps/tray/README.md).
 
 ## Using a login the user already has
 
@@ -129,7 +140,7 @@ const profile = await iron.adoptLogin({ provider: ok[0].provider, home: ok[0].ho
 ```
 
 - `discoverLogins()` runs each CLI's own status command against its default home (all of them at once; results keep a fixed provider order). `iron-proxy profiles adopt <provider>` without `--home` looks only at that provider's default home and runs no other CLI. It never reads the vendor's credential files, never persists anything, and never reports an email. `adoptedProfileId` is set when a profile already uses that home.
-- `adoptLogin()` creates a subscription profile whose `cli.home` is that exact directory and marks it `cli.adopted: true`. It refuses (`INVALID_REQUEST`) when the directory does not exist or another profile already uses it.
+- `adoptLogin()` creates a subscription profile whose `cli.home` is that exact directory and marks it `cli.adopted: true`. It then checks that one profile's sign-in once, with its own CLI's status command, and stores the result (read it with `allStates()`). It refuses (`INVALID_REQUEST`) when the directory does not exist or another profile already uses it.
 - Deleting an adopted profile **never** removes the directory; Iron-Proxy only deletes a home that is not adopted and lies strictly inside `<dataDir>/cli-homes` (not that folder itself, not a sibling such as `cli-homes-old`). It also never prepares or recreates an adopted home. `updateProfile` (and `PATCH /iron/profiles/:id`) ignores `cli.adopted` in a patch, and ignores `cli.home` for an adopted profile, so no patch can turn an adopted login into one Iron-Proxy would delete.
 - **Logging out an adopted profile signs the user's own CLI out too**, because it is the same login. The React switcher asks for confirmation first, and `iron-proxy logout` prints a note.
 - Gemini is not offered: where the Gemini CLI keeps its sign-in by default is unverified (see [PROVIDERS.md](PROVIDERS.md#existing-logins)).

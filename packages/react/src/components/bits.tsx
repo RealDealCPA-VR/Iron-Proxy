@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import type { LoginCommandInfo, Profile, ProfileState } from '@iron-proxy/core';
-import { useSwitcher } from './context.js';
+import { SwitcherContext, useSwitcher } from './context.js';
+import { defaultLabels, type Labels } from '../labels.js';
 import { useCountdown } from '../hooks/useCountdown.js';
 import { copyText, formatLoginCommand, type ClientError } from '../util.js';
 import { IconCheck, IconCopy, IconError, IconTerminal } from './icons.jsx';
@@ -54,8 +55,21 @@ export function CommandBox({ cmd }: { cmd: LoginCommandInfo }) {
   );
 }
 
-export function ErrorBanner({ error, onDismiss }: { error: ClientError; onDismiss?: () => void }) {
-  const { labels } = useSwitcher();
+/**
+ * An error with its code and hint. Uses the <AccountSwitcher>'s labels when inside
+ * one; standalone it takes `labels` (default the built-in English labels).
+ */
+export function ErrorBanner({
+  error,
+  onDismiss,
+  labels: labelsProp,
+}: {
+  error: ClientError;
+  onDismiss?: () => void;
+  labels?: Labels;
+}) {
+  const ctx = useContext(SwitcherContext);
+  const labels = labelsProp ?? ctx?.labels ?? defaultLabels;
   return (
     <div className="iron-banner iron-banner--error" role="alert">
       <IconError />

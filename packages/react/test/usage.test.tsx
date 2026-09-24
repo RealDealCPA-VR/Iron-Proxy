@@ -145,6 +145,46 @@ describe('Usage panel', () => {
     await screen.findByText('No usage recorded yet.');
   });
 
+  it('shows the error banner (message, code, hint) instead of the empty state when usageReport fails', async () => {
+    class FailingClient extends FakeIronClient {
+      override async usageReport(profileId?: string): Promise<UsageReport[]> {
+        this.calls.push(`usageReport:${profileId ?? '*'}`);
+        throw Object.assign(new Error('Usage history could not be read.'), {
+          code: 'INTERNAL',
+          hint: 'Restart the app to rebuild it.',
+        });
+      }
+    }
+    const client = new FailingClient();
+    client.seed({ id: 'a', title: 'Work Claude', provider: 'anthropic' });
+    const { unmount } = render(<UsagePanel client={client} injectStyles={false} />);
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText('Usage history could not be read.')).toBeTruthy();
+    expect(within(alert).getByText('INTERNAL')).toBeTruthy();
+    expect(within(alert).getByTestId('error-hint').textContent).toBe(
+      'Restart the app to rebuild it.',
+    );
+    expect(within(alert).getByText('Something went wrong')).toBeTruthy();
+    expect(screen.queryByText('No usage recorded yet.')).toBeNull();
+    unmount();
+
+    // Inside the switcher too, with the switcher's labels.
+    render(
+      <AccountSwitcher
+        client={client}
+        injectStyles={false}
+        labels={{ errorPrefix: 'Could not load usage' }}
+      />,
+    );
+    await screen.findByText('Work Claude');
+    fireEvent.click(screen.getByTestId('usage-toggle'));
+    const panel = await screen.findByTestId('usage-panel');
+    const inline = await within(panel).findByRole('alert');
+    expect(within(inline).getByText('Could not load usage')).toBeTruthy();
+    expect(within(inline).getByText('Usage history could not be read.')).toBeTruthy();
+    expect(within(panel).queryByText('No usage recorded yet.')).toBeNull();
+  });
+
   it('an older client without usageReport renders the empty state instead of failing', async () => {
     const client = seeded();
     const legacy = new Proxy(client, {

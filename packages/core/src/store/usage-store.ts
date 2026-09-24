@@ -7,14 +7,16 @@ import type {
 } from '../types.js';
 import { readJsonFile, systemClock, writeJsonFileAtomic, type Clock } from '../util.js';
 
-/** Records older than this are pruned on every write. */
+/** Records older than this are pruned on every write, from every profile. */
 export const USAGE_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
 /** At most this many records (requests + parks + samples) are kept per profile. */
 export const USAGE_MAX_RECORDS = 5_000;
 
 /**
  * Per-profile usage history: finished requests, parks and utilisation samples.
- * Bounded (see USAGE_MAX_AGE_MS / USAGE_MAX_RECORDS) and pruned on write. Holds
+ * Bounded (see USAGE_MAX_AGE_MS / USAGE_MAX_RECORDS) and pruned on write: every
+ * write drops records past the age limit from every profile (so an idle profile
+ * ages out too) and trims the written profile to the record limit. Holds
  * counts and timestamps only: no prompt text, output, secrets or emails.
  */
 export interface UsageStore {
@@ -25,6 +27,12 @@ export interface UsageStore {
   history(profileId: string): Promise<ProfileUsageHistory>;
   all(): Promise<Record<string, ProfileUsageHistory>>;
   delete(profileId: string): Promise<void>;
+  /**
+   * Write anything buffered to durable storage. Optional: a store that writes
+   * through (or keeps nothing) leaves it out. `IronProxy.close()` calls it after
+   * the last usage write has landed.
+   */
+  flush?(): Promise<void>;
 }
 
 export interface UsageStoreOptions {
@@ -106,7 +114,11 @@ abstract class BoundedUsageStore implements UsageStore {
     const map = await this.load();
     const h = (map[profileId] ??= empty());
     push(h);
-    pruneUsageHistory(h, this.clock.now(), this.maxAgeMs, this.maxRecords);
+    const now = this.clock.now();
+    pruneUsageHistory(h, now, this.maxAgeMs, this.maxRecords);
+    // Idle profiles age out too: every other profile loses its expired records.
+    for (const [id, other] of Object.entries(map))
+      if (id !== profileId) pruneUsageHistory(other, now, this.maxAgeMs, Infinity);
     this.changed();
   }
 
