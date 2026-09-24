@@ -6,3 +6,4 @@ CHANGELOG.md
 styles.generated.ts
 examples/**/out
 apps/**/out
+apps/**/release

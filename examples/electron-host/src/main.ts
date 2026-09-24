@@ -1,7 +1,20 @@
-import { app, BrowserWindow, ipcMain, Menu, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  Notification,
+  safeStorage,
+  type IpcMainInvokeEvent,
+} from 'electron';
 import { join } from 'node:path';
 import type { ProviderId, UnifiedRequest } from '@iron-proxy/core';
-import { createElectronIronProxy, installIronProxy, openLoginTerminal } from '@iron-proxy/electron';
+import {
+  createElectronIronProxy,
+  createNotifier,
+  installIronProxy,
+  openLoginTerminal,
+} from '@iron-proxy/electron';
 
 let selectedProfileId: string | undefined;
 
@@ -13,6 +26,16 @@ async function main() {
 
   // 2. One IPC dispatcher for the whole IronClient surface + event forwarding.
   const installation = installIronProxy({ ipcMain, iron });
+
+  // 2b. Desktop notifications: an automatic switch, a resting account, every
+  //     account of a provider resting, a sign-in that finished or failed.
+  const notifier = createNotifier({
+    iron,
+    Notification,
+    onError: (err) => console.error('[iron-proxy notifier]', err),
+  });
+  // Quitting any way (Cmd+Q, OS logout) stops it; dispose() is safe to call twice.
+  app.on('before-quit', () => notifier.dispose());
 
   // 3. App-specific channels: the renderer tells us which profile is selected,
   //    and the chat box streams through iron.stream.
@@ -67,6 +90,7 @@ async function main() {
   await win.loadFile(join(__dirname, 'index.html'));
 
   app.on('window-all-closed', async () => {
+    notifier.dispose();
     installation.dispose();
     await iron.close();
     app.quit();

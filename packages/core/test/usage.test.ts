@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createIronProxy, type IronProxy } from '../src/manager.js';
 import { MemoryProfileStore } from '../src/store/profile-store.js';
-import { MemoryStateStore } from '../src/store/state-store.js';
+import { MemoryStateStore, type StateStore } from '../src/store/state-store.js';
 import {
   FileUsageStore,
   MemoryUsageStore,
@@ -494,10 +494,23 @@ describe('IronProxy usage history, end to end through the real router', () => {
           'anthropic-ratelimit-requests-reset': iso(T0 + HOUR),
         },
       });
+    // A slow state store: the router is still storing the usage snapshot (state
+    // first, then the listeners that add the sample) when close() starts, so
+    // close() only sees the sample if it waits for the router to settle.
+    const memStates = new MemoryStateStore();
+    const states: StateStore = {
+      all: () => memStates.all(),
+      get: (id) => memStates.get(id),
+      put: async (st) => {
+        await new Promise((res) => setTimeout(res, 30));
+        await memStates.put(st);
+      },
+      delete: (id) => memStates.delete(id),
+    };
     iron = createIronProxy({
       dataDir: dir,
       profiles: new MemoryProfileStore(),
-      states: new MemoryStateStore(),
+      states,
       vault: new MemoryVault(),
       usage,
       clock,

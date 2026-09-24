@@ -41,6 +41,30 @@ export function decideProxy(
   return { action: 'start', stale: true };
 }
 
+export type ReusedProxyCheck =
+  { action: 'keep' } | { action: 'reuse'; descriptor: ProxyDescriptor } | { action: 'start' };
+
+/**
+ * While this process uses a proxy another process runs: keep using it while
+ * proxy.json still names it and its process is alive, follow proxy.json when
+ * it now names another live proxy, and start this process's own proxy when
+ * proxy.json is gone, damaged, or names a process that has exited.
+ */
+export function recheckReusedProxy(
+  reusing: ProxyDescriptor,
+  current: ProxyDescriptor | undefined,
+  isAlive: (pid: number) => boolean,
+  selfPid: number = process.pid,
+): ReusedProxyCheck {
+  const d = decideProxy(current, isAlive, selfPid);
+  if (d.action === 'start') return { action: 'start' };
+  const same =
+    d.descriptor.url === reusing.url &&
+    d.descriptor.pid === reusing.pid &&
+    d.descriptor.token === reusing.token;
+  return same ? { action: 'keep' } : { action: 'reuse', descriptor: d.descriptor };
+}
+
 /** `process.kill(pid, 0)`: true when the process exists (EPERM: it exists but is not ours). */
 export function isPidAlive(
   pid: number,

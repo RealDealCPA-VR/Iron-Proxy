@@ -10,24 +10,40 @@
   "types": "./dist/main.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/main.d.ts",
-      "import": "./dist/main.js",
-      "require": "./dist/main.cjs"
+      "import": {
+        "types": "./dist/main.d.ts",
+        "default": "./dist/main.js"
+      },
+      "require": {
+        "types": "./dist/main.d.cts",
+        "default": "./dist/main.cjs"
+      }
     },
     "./preload": {
-      "types": "./dist/preload.d.ts",
-      "import": "./dist/preload.js",
-      "require": "./dist/preload.cjs"
+      "import": {
+        "types": "./dist/preload.d.ts",
+        "default": "./dist/preload.js"
+      },
+      "require": {
+        "types": "./dist/preload.d.cts",
+        "default": "./dist/preload.cjs"
+      }
     },
     "./renderer": {
-      "types": "./dist/renderer.d.ts",
-      "import": "./dist/renderer.js",
-      "require": "./dist/renderer.cjs"
+      "import": {
+        "types": "./dist/renderer.d.ts",
+        "default": "./dist/renderer.js"
+      },
+      "require": {
+        "types": "./dist/renderer.d.cts",
+        "default": "./dist/renderer.cjs"
+      }
     }
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -67,6 +83,11 @@
     "directory": "packages/electron"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/RealDealCPA-VR/Iron-Proxy/tree/main/packages/electron#readme",
+  "bugs": {
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy/issues"
   }
 }

@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createIronProxy, type LoginCommandInfo } from '@iron-proxy/core';
-import { createProxyServer, type ProxyServerOptions } from '@iron-proxy/proxy';
+import { createProxyServer, type ProxyServer, type ProxyServerOptions } from '@iron-proxy/proxy';
 import { startTrayApp, type TrayAppHandle } from '../src/app.js';
 import { TRAY_CHANNELS, type TrayInfo } from '../src/logic/channels.js';
 import { defaultSettings, saveSettings, SETTINGS_FILE } from '../src/logic/settings.js';
@@ -308,6 +308,121 @@ describe('tray app wiring', () => {
     expect(opened).toHaveLength(1);
   });
 
+  it('starts its own proxy when the proxy it was sharing goes away', async () => {
+    const other = { url: 'http://127.0.0.1:45679', token: 'other-token', pid: 999_997 };
+    await writeFile(join(dir, 'proxy.json'), JSON.stringify(other));
+    await saveSettings(dir, { ...defaultSettings(), proxyPort: await takenPort() });
+    const alive = new Set([other.pid]);
+    let changed: ((name?: string) => void) | undefined;
+    const electron = createFakeElectron();
+    handle = await start(electron, {
+      isAlive: (pid) => alive.has(pid),
+      watch: (_dir, onChange) => {
+        changed = onChange;
+        return { close() {} };
+      },
+    });
+    const h = handle!;
+    expect(h.info()).toMatchObject({ proxyUrl: other.url, proxyOwned: false });
+    await h.dispatch({ type: 'open-window' });
+    const win = electron.windows[0]!;
+
+    // `iron-proxy serve` stops and removes its proxy.json: the watcher sees it.
+    await unlink(join(dir, 'proxy.json'));
+    changed!('proxy.json');
+    await vi.waitFor(() => expect(h.info().proxyOwned).toBe(true));
+    const mine = JSON.parse(await readFile(join(dir, 'proxy.json'), 'utf8'));
+    expect(mine.pid).toBe(process.pid);
+    expect(h.info().proxyUrl).toBe(mine.url);
+    expect((await fetch(`${mine.url}/iron/health`)).status).toBe(200);
+    // The window hears about the new URL, and the menu copies it.
+    await vi.waitFor(() =>
+      expect(
+        win.webContents.sent.some(
+          (m) =>
+            m.channel === TRAY_CHANNELS.changed && (m.args[0] as TrayInfo).proxyUrl === mine.url,
+        ),
+      ).toBe(true),
+    );
+    await vi.waitFor(() =>
+      expect(h.menu().find((i) => i.id === 'copy-openai')?.action).toEqual({
+        type: 'copy',
+        text: `${mine.url}/v1`,
+      }),
+    );
+  });
+
+  it('starts its own proxy on a menu rebuild once the shared one has exited', async () => {
+    const other = { url: 'http://127.0.0.1:45680', token: 'other-token', pid: 999_996 };
+    await writeFile(join(dir, 'proxy.json'), JSON.stringify(other));
+    await saveSettings(dir, { ...defaultSettings(), proxyPort: await takenPort() });
+    const alive = new Set([other.pid]);
+    const electron = createFakeElectron();
+    // No file event arrives (the process was killed and left proxy.json behind).
+    handle = await start(electron, {
+      isAlive: (pid) => alive.has(pid),
+      watch: () => ({ close() {} }),
+    });
+    const h = handle!;
+    await h.refresh();
+    expect(h.info().proxyOwned).toBe(false);
+    alive.delete(other.pid);
+    await h.refresh();
+    expect(h.info().proxyOwned).toBe(true);
+    const mine = JSON.parse(await readFile(join(dir, 'proxy.json'), 'utf8'));
+    expect(mine.pid).toBe(process.pid);
+    expect((await fetch(`${mine.url}/iron/health`)).status).toBe(200);
+  });
+
+  it('starts listening on a newly saved port when no proxy is running', async () => {
+    let failing = true;
+    const errors: unknown[] = [];
+    const createServer = (o: ProxyServerOptions): ProxyServer => {
+      const s = createProxyServer(o);
+      if (failing) {
+        s.listen = async () => {
+          throw Object.assign(new Error('refused'), { code: 'EFAKE' });
+        };
+      }
+      return s;
+    };
+    const electron = createFakeElectron();
+    handle = await start(electron, { createServer, onError: (err) => errors.push(err) });
+    const h = handle!;
+    expect(h.info().proxyUrl).toBeUndefined();
+    expect(errors).toHaveLength(1);
+
+    failing = false;
+    const probe = createNetServer();
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const wanted = (probe.address() as { port: number }).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const info = (await electron.ipc.invoke(TRAY_CHANNELS.setSettings, {
+      proxyPort: wanted,
+    })) as TrayInfo;
+    expect(info).toMatchObject({
+      proxyUrl: `http://127.0.0.1:${wanted}`,
+      proxyPort: wanted,
+      proxyOwned: true,
+    });
+    expect((await fetch(`${info.proxyUrl}/iron/health`)).status).toBe(200);
+  });
+
+  it("leaves another process's running proxy alone when the port changes", async () => {
+    const other = { url: 'http://127.0.0.1:45681', token: 'other-token', pid: 999_995 };
+    await writeFile(join(dir, 'proxy.json'), JSON.stringify(other));
+    const electron = createFakeElectron();
+    const createServer = vi.fn((o: ProxyServerOptions) => createProxyServer(o));
+    handle = await start(electron, { isAlive: (pid) => pid === other.pid, createServer });
+    const info = (await electron.ipc.invoke(TRAY_CHANNELS.setSettings, {
+      proxyPort: 45_999,
+    })) as TrayInfo;
+    expect(createServer).not.toHaveBeenCalled();
+    expect(info).toMatchObject({ proxyUrl: other.url, proxyOwned: false });
+    expect(info.settings.proxyPort).toBe(45_999);
+    expect(JSON.parse(await readFile(join(dir, 'proxy.json'), 'utf8'))).toEqual(other);
+  });
+
   it('moves its own proxy to a new port when the setting changes', async () => {
     await saveSettings(dir, { ...defaultSettings(), proxyPort: await takenPort() });
     const electron = createFakeElectron();
@@ -430,6 +545,35 @@ describe('tray app wiring', () => {
     await h.dispatch({ type: 'open-window' });
     expect(win.reloads).toBe(1);
 
+    // The tray's own writes fire the watcher too, but are not another process's
+    // changes: the hidden window is not reloaded for them.
+    win.close();
+    const own = await h.iron.createProfile({
+      title: 'Own Write',
+      provider: 'anthropic',
+      lane: 'api-key',
+      apiKeySecret: 'sk-own',
+    });
+    await h.iron.refreshStatus(own.id);
+    await (h.iron.states as unknown as { flush(): Promise<void> }).flush();
+    changed!('profiles.json');
+    changed!('state.json');
+    await h.refresh();
+    expect(findItem(h.menu(), `account-${own.id}`)).toBeDefined();
+    await h.dispatch({ type: 'open-window' });
+    expect(win.reloads).toBe(1);
+    // A park the CLI records afterwards is another process's change again.
+    win.close();
+    const cli2 = createIronProxy({ dataDir: dir });
+    const st2 = await cli2.router.state(added.id);
+    await cli2.states.put({ ...st2, status: 'parked', parkedUntil: '2999-01-01T00:00:00Z' });
+    await cli2.close();
+    changed!('state.json');
+    await h.refresh();
+    expect(findItem(h.menu(), `account-${added.id}`)?.label).toMatch(/parked/);
+    await h.dispatch({ type: 'open-window' });
+    expect(win.reloads).toBe(2);
+
     // And the tray's own changes keep what the CLI wrote.
     const mine = await h.iron.createProfile({
       title: 'Added In Tray',
@@ -439,7 +583,7 @@ describe('tray app wiring', () => {
     });
     const status = createIronProxy({ dataDir: dir });
     expect((await status.listProfiles()).map((p) => p.id).sort()).toEqual(
-      [added.id, mine.id].sort(),
+      [added.id, own.id, mine.id].sort(),
     );
     await status.close();
 

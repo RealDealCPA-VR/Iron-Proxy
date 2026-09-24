@@ -23,7 +23,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm test",
+    "pack:check": "node scripts/check-pack.mjs",
+    "manifests": "node scripts/update-manifests.mjs",
+    "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check",
     "changeset": "changeset",
     "release": "pnpm build && changeset publish"
   },

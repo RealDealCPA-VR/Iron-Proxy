@@ -124,7 +124,7 @@ Everything the UI does is a method on `iron` (`createProfile`, `login`, `activat
 ## Choosing a dataDir
 
 - Per-app isolation: your own directory (Electron: `<userData>/iron-proxy`).
-- Shared accounts across your tools: `~/.iron-proxy` (the default) or `IRON_PROXY_DATA_DIR`. The `iron-proxy` CLI and the tray app (`apps/tray`) both use it, and several processes on one directory see each other's changes.
+- Shared accounts across your tools: `~/.iron-proxy` (the default) or `IRON_PROXY_DATA_DIR`. The `iron-proxy` CLI and the tray app (`apps/tray`) both use it, and several processes on one directory see each other's changes and can write at the same time without losing any (writes merge under a short-lived lock file).
 - Just want account switching for the tools you already use, without writing code? That is the tray app: see [apps/tray/README.md](../apps/tray/README.md).
 
 ## Using a login the user already has

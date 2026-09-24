@@ -592,7 +592,6 @@ export class Router {
     return (await this.deps.states.get(profileId)) ?? { profileId, status: 'unknown', served: 0 };
   }
 
-  /** Queue a usage write behind any earlier one for the same profile. */
   /**
    * Resolves once every usage snapshot reported so far has been stored and its
    * onUsage listeners have run, including writes queued while waiting.
@@ -601,6 +600,7 @@ export class Router {
     while (this.usageWrites.size) await Promise.all([...this.usageWrites.values()]);
   }
 
+  /** Queue a usage write behind any earlier one for the same profile. */
   private reportUsage(profileId: string, usage: UsageSnapshot): void {
     const prev = this.usageWrites.get(profileId) ?? Promise.resolve();
     const next = prev.then(() => this.recordUsage(profileId, usage)).catch(() => {});

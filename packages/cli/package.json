@@ -11,13 +11,16 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
     }
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -48,6 +51,11 @@
     "directory": "packages/cli"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/RealDealCPA-VR/Iron-Proxy/tree/main/packages/cli#readme",
+  "bugs": {
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy/issues"
   }
 }

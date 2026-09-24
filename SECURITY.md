@@ -23,6 +23,11 @@ The desktop tray app (`apps/tray`) shares its accounts with the `iron-proxy` CLI
 - API keys are AES-256-GCM encrypted in `vault.json`, but the master key in `vault.key` is protected only by file permissions, as with the CLI. Anyone who can read your files as your user can decrypt them. An Electron app built with `createElectronIronProxy` wraps the key with the OS keychain instead, and does not share its accounts with the CLI.
 - The tray's proxy binds to loopback. Its window can ask the main process to open a terminal login only for a command equal to one of the accounts' own login commands. Menu labels, the tooltip and notifications use account titles (email-shaped titles masked) and provider names only.
 
+## Installers and npm packages
+
+- The tray installers on GitHub Releases are built by `.github/workflows/tray-release.yml` from the tagged commit, and each release carries a `SHA256SUMS.txt`. They are **not code-signed** yet (unsigned on Windows, ad-hoc signed and not notarised on macOS), so a checksum match against the release page, or building from source, is the only integrity check today. Signing is on the roadmap.
+- The npm packages are published only from the release workflow with npm provenance (`publishConfig.provenance`), which links each tarball to the commit and workflow run that built it.
+
 ## What it does not protect against
 
 - An attacker running as your user on your machine. They can read the key file (or ask DPAPI to unwrap it) and can run the vendor CLIs from the isolated homes. This is the same exposure the vendor CLIs have on their own.

@@ -1,0 +1,141 @@
+name: Tray release
+
+# Builds the Iron-Proxy tray app installers on Windows, macOS and Linux.
+# - A pushed tag `tray-v<version>` (matching apps/tray/package.json) creates a GitHub Release
+#   with every installer and SHA256SUMS.txt attached.
+# - A manual run (workflow_dispatch) on a branch only uploads the installers as workflow
+#   artifacts; nothing is released.
+# The builds are UNSIGNED (Windows) and ad-hoc signed (macOS); the release body says so.
+
+on:
+  push:
+    tags: ['tray-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tray-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The gate never needs the Electron binary; electron-builder downloads its own copy.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  build:
+    name: installers / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/tray-v')
+        run: |
+          version="$(node -p "require('./apps/tray/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "tray-v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match apps/tray/package.json version ${version}"
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Build Windows installers (x64, arm64)
+        if: runner.os == 'Windows'
+        working-directory: apps/tray
+        run: |
+          pnpm exec electron-builder --win nsis --x64 --publish never -c.directories.output=release/x64
+          pnpm exec electron-builder --win nsis --arm64 --publish never -c.directories.output=release/arm64
+      - name: Build macOS installers (x64, arm64)
+        if: runner.os == 'macOS'
+        working-directory: apps/tray
+        run: pnpm exec electron-builder --mac dmg zip --x64 --arm64 --publish never
+      - name: Build Linux installers (AppImage, deb)
+        if: runner.os == 'Linux'
+        working-directory: apps/tray
+        run: pnpm exec electron-builder --linux AppImage deb --x64 --publish never
+      - name: Collect installers
+        run: |
+          mkdir -p installers
+          find apps/tray/release -maxdepth 2 -type f \
+            \( -name 'Iron-Proxy-Setup-*.exe' -o -name 'Iron-Proxy-*.dmg' -o -name 'Iron-Proxy-*-mac.zip' \
+               -o -name 'Iron-Proxy-*.AppImage' -o -name 'iron-proxy_*.deb' \) \
+            ! -name '*__uninstaller*' \
+            -exec cp {} installers/ \;
+          ls -l installers
+          count="$(find installers -type f | wc -l)"
+          if [ "$count" -eq 0 ]; then echo "::error::No installers were produced"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: installers/*
+          if-no-files-found: error
+
+  release:
+    name: checksums and release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+      - name: SHA256SUMS.txt
+        working-directory: installers
+        run: |
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-all
+          path: installers/*
+      - name: Create the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/tray-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#tray-v}"
+          cat > notes.md <<NOTES
+          Iron-Proxy tray app ${version}: the desktop app for Windows, macOS and Linux.
+
+          | System | Download |
+          | --- | --- |
+          | Windows (most PCs) | \`Iron-Proxy-Setup-${version}-x64.exe\` |
+          | Windows on ARM | \`Iron-Proxy-Setup-${version}-arm64.exe\` |
+          | Mac with Apple silicon (M1 and later) | \`Iron-Proxy-${version}-arm64.dmg\` |
+          | Mac with Intel | \`Iron-Proxy-${version}-x64.dmg\` |
+          | Linux (x64) | the \`.AppImage\` (any distribution) or the \`.deb\` (Debian, Ubuntu) |
+
+          **These builds are not code-signed.** Windows SmartScreen and macOS Gatekeeper will warn
+          the first time you open the app:
+
+          - **Windows:** on "Windows protected your PC", click **More info**, then **Run anyway**.
+          - **macOS:** right-click (or Control-click) Iron-Proxy in Applications and choose **Open**,
+            then **Open** again. Or run \`xattr -dr com.apple.quarantine /Applications/Iron-Proxy.app\`.
+
+          Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\`).
+          Details: https://github.com/${GH_REPO}/blob/main/apps/tray/README.md#install
+          NOTES
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" installers/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" installers/* \
+              --title "Iron-Proxy tray ${version}" --notes-file notes.md --verify-tag
+          fi

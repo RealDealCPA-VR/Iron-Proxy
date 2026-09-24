@@ -344,7 +344,9 @@ interface PendingPark {
  * the router announces the switch only once the next account has answered: when
  * that switch arrives, the park is dropped and one "Switched to ..." shows. The
  * hold never exceeds `maxHoldMs` from the park, so an abandoned request cannot
- * swallow it. A
+ * swallow it. When a switch arrives after its park was already shown that way
+ * (a stream longer than `maxHoldMs`), and that park was shown within
+ * `throttleMs`, the switch is not shown: one notification per incident. A
  * `provider.exhausted` for the provider also replaces its pending parks.
  */
 export function createNotifier(opts: CreateNotifierOptions): Notifier {
@@ -362,6 +364,8 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
   const parkedUntil = new Map<string, string>();
   const pending = new Map<string, PendingPark>();
   const lastShown = new Map<string, number>();
+  /** When each account's park notification was last shown, with its provider. */
+  const parkShown = new Map<string, { at: number; provider: ProviderId | undefined }>();
 
   const listProfiles = (): Promise<Profile[]> =>
     opts.iron ? opts.iron.listProfiles() : opts.client.listProfiles();
@@ -392,25 +396,45 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
     return settings.kinds?.[kind] !== false;
   }
 
-  function show(n: DesktopNotification | undefined, key: string): void {
-    if (!n || disposed || !allowed(n.kind)) return;
+  /** True when the notification was shown. */
+  function show(n: DesktopNotification | undefined, key: string): boolean {
+    if (!n || disposed || !allowed(n.kind)) return false;
     const throttleKey = `${n.kind}:${key}`;
     const now = clock.now();
     const last = lastShown.get(throttleKey);
-    if (last !== undefined && now - last < throttleMs) return;
+    if (last !== undefined && now - last < throttleMs) return false;
     try {
-      if (!NotificationClass.isSupported()) return;
+      if (!NotificationClass.isSupported()) return false;
       new NotificationClass({ title: n.title, body: n.body, silent: false }).show();
       lastShown.set(throttleKey, now);
+      return true;
     } catch (err) {
       onError(err);
+      return false;
     }
   }
 
   function releasePark(p: PendingPark): void {
     if (pending.get(p.event.profileId) !== p) return;
     dropPark(p);
-    show(notificationFor(p.event, ctx), p.event.profileId);
+    if (show(notificationFor(p.event, ctx), p.event.profileId))
+      parkShown.set(p.event.profileId, { at: clock.now(), provider: p.provider });
+  }
+
+  /** The account whose park was shown within throttleMs (for a switch that follows it late). */
+  function recentlyShownPark(fromId: string | undefined, provider: ProviderId): string | undefined {
+    const now = clock.now();
+    const fresh = (id: string) => {
+      const s = parkShown.get(id);
+      return s !== undefined && now - s.at < throttleMs ? s : undefined;
+    };
+    if (fromId !== undefined) return fresh(fromId) ? fromId : undefined;
+    let latest: { id: string; at: number } | undefined;
+    for (const id of parkShown.keys()) {
+      const s = fresh(id);
+      if (s && s.provider === provider && (!latest || s.at >= latest.at)) latest = { id, at: s.at };
+    }
+    return latest?.id;
   }
 
   function armPark(p: PendingPark): void {
@@ -454,6 +478,7 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
       case 'profile.deleted':
         profiles.delete(e.profileId);
         parkedUntil.delete(e.profileId);
+        parkShown.delete(e.profileId);
         {
           const p = pending.get(e.profileId);
           if (p) dropPark(p);
@@ -512,15 +537,30 @@ export function createNotifier(opts: CreateNotifierOptions): Notifier {
         // Only the park of the account the switch came from is replaced by the
         // switch; parks of other accounts keep their own timers.
         let fromId = e.fromProfileId;
+        let replaced = false;
         if (fromId !== undefined) {
           const p = pending.get(fromId);
-          if (p) dropPark(p);
+          if (p) {
+            dropPark(p);
+            replaced = true;
+          }
         } else {
           let latest: PendingPark | undefined;
           for (const p of pending.values()) if (p.provider === e.provider) latest = p;
           if (latest) {
             dropPark(latest);
             fromId = latest.event.profileId;
+            replaced = true;
+          }
+        }
+        // The park was already shown (the answer on the next account took longer
+        // than maxHoldMs): the user has heard about this incident, so the late
+        // switch stays quiet while that park is within throttleMs.
+        if (!replaced) {
+          const shownFor = recentlyShownPark(fromId, e.provider);
+          if (shownFor !== undefined) {
+            parkShown.delete(shownFor);
+            return;
           }
         }
         const ev = fromId === undefined ? e : { ...e, fromProfileId: fromId };

@@ -84,7 +84,7 @@ describe('state stores', () => {
     const s2 = new FileStateStore(dir);
     expect((await s2.get('a'))?.parkedUntil).toBe('2026-01-01T00:00:00.000Z');
   });
-  it('file store sees a park another process recorded, but never over its own unsaved writes', async () => {
+  it('file store sees a park another process recorded; its own unsaved writes win only for their account', async () => {
     const tray = new FileStateStore(dir, { debounceMs: 10_000 });
     const serve = new FileStateStore(dir, { debounceMs: 10_000 });
     await tray.put({ profileId: 'a', status: 'ready', served: 0 });
@@ -93,12 +93,68 @@ describe('state stores', () => {
     await serve.put({ profileId: 'a', status: 'parked', served: 1, parkedUntil: 'x' });
     await serve.flush();
     expect((await tray.get('a'))?.status).toBe('parked');
-    // An unsaved write here wins over the file until it is flushed.
+    // An unsaved write here wins over the file for its own account until it is
+    // flushed; the other process's accounts still show, and the flush keeps them.
     await tray.put({ profileId: 'b', status: 'ready', served: 0 });
+    await tray.put({ profileId: 'a', status: 'ready', served: 2 });
     await serve.put({ profileId: 'c', status: 'ready', served: 0 });
     await serve.flush();
-    expect(Object.keys(await tray.all()).sort()).toEqual(['a', 'b']);
+    const seen = await tray.all();
+    expect(Object.keys(seen).sort()).toEqual(['a', 'b', 'c']);
+    expect(seen.a?.status).toBe('ready');
     await tray.flush();
-    expect(Object.keys(await new FileStateStore(dir).all()).sort()).toEqual(['a', 'b']);
+    const onDisk = await new FileStateStore(dir).all();
+    expect(Object.keys(onDisk).sort()).toEqual(['a', 'b', 'c']);
+    expect(onDisk.a?.served).toBe(2);
+  });
+
+  it('file store deletes are applied on top of what another process wrote', async () => {
+    const tray = new FileStateStore(dir, { debounceMs: 10_000 });
+    const serve = new FileStateStore(dir, { debounceMs: 10_000 });
+    await tray.put({ profileId: 'a', status: 'ready', served: 0 });
+    await tray.put({ profileId: 'b', status: 'ready', served: 0 });
+    await tray.flush();
+    await serve.all(); // serve holds a and b
+    await tray.delete('a');
+    await tray.flush();
+    await serve.put({ profileId: 'b', status: 'parked', served: 1 });
+    await serve.flush();
+    const onDisk = await new FileStateStore(dir).all();
+    expect(Object.keys(onDisk)).toEqual(['b']);
+    expect(onDisk.b?.status).toBe('parked');
+  });
+});
+
+describe('telling own writes from another process', () => {
+  it('externalWrites counts only versions another store wrote', async () => {
+    const tray = new FileProfileStore(dir);
+    const cli = new FileProfileStore(dir);
+    await tray.list();
+    expect(tray.externalWrites).toBe(0);
+    await tray.put(profile('a'));
+    await tray.put(profile('b'));
+    await tray.list();
+    expect(tray.externalWrites).toBe(0);
+    await cli.put(profile('c'));
+    expect(cli.externalWrites).toBe(1); // it read the tray's file before merging
+    await tray.list();
+    expect(tray.externalWrites).toBe(1);
+    await tray.list();
+    expect(tray.externalWrites).toBe(1);
+    // A write that merges an unseen external version counts it too.
+    await cli.put(profile('d'));
+    await tray.put(profile('e'));
+    expect(tray.externalWrites).toBe(2);
+
+    const st = new FileStateStore(dir, { debounceMs: 1 });
+    await st.put({ profileId: 'a', status: 'ready', served: 0 });
+    await st.flush();
+    await st.all();
+    expect(st.externalWrites).toBe(0);
+    const other = new FileStateStore(dir, { debounceMs: 1 });
+    await other.put({ profileId: 'b', status: 'ready', served: 0 });
+    await other.flush();
+    await st.all();
+    expect(st.externalWrites).toBe(1);
   });
 });

@@ -30,8 +30,10 @@ import {
   decideProxy,
   isPidAlive,
   readDescriptor,
+  recheckReusedProxy,
   removeDescriptorIfOwned,
   writeDescriptor,
+  type ProxyDescriptor,
 } from './logic/proxy.js';
 import {
   applySettingsPatch,
@@ -77,8 +79,9 @@ export interface StartTrayAppOptions {
   openLoginTerminal?: (cmd: LoginCommandInfo) => Promise<unknown>;
   timers?: TrayTimers;
   /**
-   * Notices when the CLI or a running `serve` changes profiles.json / state.json,
-   * so the menu and window follow. Default `watchDataDir` (fs.watch).
+   * Notices when the CLI or a running `serve` changes profiles.json / state.json
+   * (so the menu and window follow) or proxy.json (so the tray starts its own
+   * proxy when the one it was sharing goes away). Default `watchDataDir` (fs.watch).
    */
   watch?: WatchDir;
   /** Quiet period before the menu rebuilds after a burst of events. Default 250 ms. */
@@ -164,6 +167,7 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
   if (platform === 'darwin') app.dock?.hide();
 
   let settings: TraySettings = await loadSettings(dataDir);
+  let quitting = false;
   await mkdir(dataDir, { recursive: true });
   const iron = createIronProxy({ dataDir });
 
@@ -172,6 +176,15 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
   let server: ProxyServer | undefined;
   let proxyUrl: string | undefined;
   let proxyPort: number | undefined;
+  /** The other process's proxy this tray is using, while it uses one. */
+  let reusing: ProxyDescriptor | undefined;
+  /** Proxy start/stop/switch steps run one at a time. */
+  let proxyChain: Promise<unknown> = Promise.resolve();
+  function serialProxy<T>(fn: () => Promise<T>): Promise<T> {
+    const next = proxyChain.then(fn, fn);
+    proxyChain = next.catch(() => {});
+    return next;
+  }
 
   async function listenOn(port: number): Promise<void> {
     const make = (p: number) =>
@@ -201,14 +214,16 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
     await removeDescriptorIfOwned(dataDir, pid).catch(onError);
   }
 
-  async function startOrReuseProxy(): Promise<void> {
-    const decision = decideProxy(await readDescriptor(dataDir), isAlive, pid);
-    if (decision.action === 'reuse') {
-      proxyUrl = decision.descriptor.url;
-      const port = Number(new URL(decision.descriptor.url).port);
-      proxyPort = Number.isInteger(port) && port > 0 ? port : undefined;
-      return;
-    }
+  function useOther(d: ProxyDescriptor): void {
+    reusing = d;
+    proxyUrl = d.url;
+    const port = Number(new URL(d.url).port);
+    proxyPort = Number.isInteger(port) && port > 0 ? port : undefined;
+  }
+
+  /** Start this app's own proxy on the preferred port; a failure leaves it off. */
+  async function startOwnProxy(): Promise<void> {
+    reusing = undefined;
     try {
       await listenOn(settings.proxyPort);
     } catch (err) {
@@ -218,7 +233,29 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
     }
   }
 
-  await startOrReuseProxy();
+  async function startOrReuseProxy(): Promise<void> {
+    const decision = decideProxy(await readDescriptor(dataDir), isAlive, pid);
+    if (decision.action === 'reuse') useOther(decision.descriptor);
+    else await startOwnProxy();
+  }
+
+  /**
+   * While the tray uses another process's proxy: follow proxy.json, and start
+   * the tray's own proxy once that one is gone (proxy.json removed, or its
+   * process no longer alive). True when anything changed.
+   */
+  function recheckProxy(): Promise<boolean> {
+    return serialProxy(async () => {
+      if (!reusing || server || quitting) return false;
+      const check = recheckReusedProxy(reusing, await readDescriptor(dataDir), isAlive, pid);
+      if (check.action === 'keep' || quitting) return false;
+      if (check.action === 'reuse') useOther(check.descriptor);
+      else await startOwnProxy();
+      return true;
+    });
+  }
+
+  await serialProxy(startOrReuseProxy);
 
   /* ---------------- bridge + notifications ---------------- */
 
@@ -235,7 +272,6 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
   /* ---------------- window ---------------- */
 
   let win: BrowserWindowLike | undefined;
-  let quitting = false;
   /** profiles.json or state.json changed on disk since the window last loaded. */
   let externalChange = false;
 
@@ -318,17 +354,21 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
     await saveSettings(dataDir, settings);
     notifier.setSettings(toNotifierSettings(settings));
     if (settings.startAtLogin !== prev.startAtLogin) applyLoginItem(settings.startAtLogin);
-    // A new port applies at once when this app runs the proxy; a proxy started
-    // elsewhere (iron-proxy serve) is left alone and the port is used next time.
-    if (settings.proxyPort !== prev.proxyPort && server) {
-      await stopOwnProxy();
-      try {
-        await listenOn(settings.proxyPort);
-      } catch (err) {
-        proxyUrl = undefined;
-        proxyPort = undefined;
-        onError(err);
-      }
+    // A new port applies at once when this app runs the proxy, or when no proxy
+    // is running at all (it starts on the new port). A proxy started elsewhere
+    // (iron-proxy serve) that is still running is left alone; the port is used
+    // when this app next starts its own.
+    if (settings.proxyPort !== prev.proxyPort) {
+      await recheckProxy();
+      await serialProxy(async () => {
+        if (quitting) return;
+        if (server) {
+          await stopOwnProxy();
+          await startOwnProxy();
+        } else if (!reusing) {
+          await startOwnProxy();
+        }
+      });
     }
     scheduleRefresh(0);
     sendChanged();
@@ -350,10 +390,27 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
   let refreshing: Promise<void> = Promise.resolve();
   let disposed = false;
 
+  /** Versions of profiles.json / state.json written by another process, read so far. */
+  const externalWrites = (): number =>
+    [iron.profiles, iron.states].reduce((n, store) => {
+      const v = (store as { externalWrites?: unknown }).externalWrites;
+      return n + (typeof v === 'number' ? v : 0);
+    }, 0);
+  let externalSeen = externalWrites();
+
   async function rebuild(): Promise<void> {
     if (disposed) return;
+    // The proxy this tray shares may have gone away since the last rebuild.
+    if (await recheckProxy()) sendChanged();
     const [profiles, states] = await Promise.all([iron.listProfiles(), iron.allStates()]);
     if (disposed) return;
+    // Only another process's changes make the hidden window reload: the tray's
+    // own writes reach the window through its events already.
+    const ext = externalWrites();
+    if (ext !== externalSeen) {
+      externalSeen = ext;
+      externalChange = true;
+    }
     const now = timers.now();
     const providers = iron.registry.list().map((a) => ({ id: a.id }));
     const activeByProvider = activeAccounts(profiles, states, now);
@@ -420,8 +477,19 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
   let watcher: { close(): void } | undefined;
   try {
     watcher = (opts.watch ?? watchDataDir)(dataDir, (name) => {
-      if (name !== undefined && !/^(profiles|state)\.json/.test(name)) return;
-      externalChange = true;
+      if (name === undefined || name === 'proxy.json') {
+        void recheckProxy()
+          .then((changed) => {
+            if (!changed) return;
+            sendChanged();
+            scheduleRefresh(0);
+          })
+          .catch(onError);
+      }
+      // Whether a change came from another process is decided on the rebuild
+      // (the stores count file versions they did not write), not here: this
+      // process's own writes fire the watcher too.
+      if (name !== undefined && !/^(profiles|state)\.json$/.test(name)) return;
       scheduleRefresh();
     });
   } catch (err) {
@@ -490,6 +558,7 @@ export async function startTrayApp(opts: StartTrayAppOptions): Promise<TrayAppHa
     shutdownPromise ??= (async () => {
       quitting = true;
       disposed = true;
+      await proxyChain;
       if (debounceTimer !== undefined) timers.clearTimeout(debounceTimer);
       if (expiryTimer !== undefined) timers.clearTimeout(expiryTimer);
       offEvents();

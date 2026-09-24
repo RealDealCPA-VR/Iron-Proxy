@@ -6,6 +6,7 @@ import type {
   UsageSampleRecord,
 } from '../types.js';
 import { readJsonFile, systemClock, writeJsonFileAtomic, type Clock } from '../util.js';
+import { fileFingerprint, withFileLock, type FileLockOptions } from './file-lock.js';
 
 /** Records older than this are pruned on every write, from every profile. */
 export const USAGE_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
@@ -95,6 +96,13 @@ export function pruneUsageHistory(
   return h;
 }
 
+type UsageKind = 'requests' | 'parks' | 'samples';
+
+/** One change to the history: a record appended, or a profile's history deleted. */
+type UsageOp =
+  | { type: 'add'; profileId: string; kind: UsageKind; record: { at: string } }
+  | { type: 'delete'; profileId: string };
+
 /** Shared bookkeeping for the memory and file stores. */
 abstract class BoundedUsageStore implements UsageStore {
   protected readonly clock: Clock;
@@ -108,28 +116,41 @@ abstract class BoundedUsageStore implements UsageStore {
   }
 
   protected abstract load(): Promise<Record<string, ProfileUsageHistory>>;
-  protected abstract changed(): void;
+  /** `op` was just applied to `map` (what load() returned). */
+  protected abstract changed(op: UsageOp, map: Record<string, ProfileUsageHistory>): void;
 
-  private async add(profileId: string, push: (h: ProfileUsageHistory) => void): Promise<void> {
-    const map = await this.load();
-    const h = (map[profileId] ??= empty());
-    push(h);
+  /**
+   * Apply one change to a history map. An append also prunes: the profile to the
+   * age and record limits, and every other profile by age (so idle ones age out).
+   */
+  protected apply(map: Record<string, ProfileUsageHistory>, op: UsageOp): void {
+    if (op.type === 'delete') {
+      delete map[op.profileId];
+      return;
+    }
+    const h = (map[op.profileId] ??= empty());
+    (h[op.kind] as Array<{ at: string }>).push(op.record);
     const now = this.clock.now();
     pruneUsageHistory(h, now, this.maxAgeMs, this.maxRecords);
-    // Idle profiles age out too: every other profile loses its expired records.
     for (const [id, other] of Object.entries(map))
-      if (id !== profileId) pruneUsageHistory(other, now, this.maxAgeMs, Infinity);
-    this.changed();
+      if (id !== op.profileId) pruneUsageHistory(other, now, this.maxAgeMs, Infinity);
+  }
+
+  private async add(profileId: string, kind: UsageKind, record: { at: string }): Promise<void> {
+    const map = await this.load();
+    const op: UsageOp = { type: 'add', profileId, kind, record: structuredClone(record) };
+    this.apply(map, op);
+    this.changed(op, map);
   }
 
   addRequest(profileId: string, record: UsageRequestRecord): Promise<void> {
-    return this.add(profileId, (h) => h.requests.push(structuredClone(record)));
+    return this.add(profileId, 'requests', record);
   }
   addPark(profileId: string, record: UsageParkRecord): Promise<void> {
-    return this.add(profileId, (h) => h.parks.push(structuredClone(record)));
+    return this.add(profileId, 'parks', record);
   }
   addSample(profileId: string, record: UsageSampleRecord): Promise<void> {
-    return this.add(profileId, (h) => h.samples.push(structuredClone(record)));
+    return this.add(profileId, 'samples', record);
   }
   async history(profileId: string): Promise<ProfileUsageHistory> {
     const h = (await this.load())[profileId];
@@ -141,8 +162,9 @@ abstract class BoundedUsageStore implements UsageStore {
   async delete(profileId: string): Promise<void> {
     const map = await this.load();
     if (!(profileId in map)) return;
-    delete map[profileId];
-    this.changed();
+    const op: UsageOp = { type: 'delete', profileId };
+    this.apply(map, op);
+    this.changed(op, map);
   }
 }
 
@@ -162,51 +184,113 @@ interface UsageFile {
 /**
  * `<dataDir>/usage.json`: atomic writes (temp file + rename), debounced so a busy
  * stream does not hammer the disk. Safe to delete; only the history is lost.
+ *
+ * Every process on the data directory records into this one file, so a write
+ * never replays this process's whole view over it: under a lock file
+ * (`usage.json.lock`) it re-reads the file and applies only the records this
+ * process appended (and the histories it deleted) since its last write. A read
+ * re-loads the file when it changed on disk, with the unsaved records on top.
  */
 export class FileUsageStore extends BoundedUsageStore {
   readonly path: string;
   private cache: Record<string, ProfileUsageHistory> | undefined;
   private loading: Promise<Record<string, ProfileUsageHistory>> | undefined;
+  /** Identity of the file the cache came from. */
+  private seen: string | undefined;
+  /** Changes since the last write, oldest first. */
+  private readonly ops: UsageOp[] = [];
+  /** Bumped by every write, so a read that started before it cannot replace its result. */
+  private gen = 0;
   private timer: NodeJS.Timeout | undefined;
-  private pending: Promise<void> | undefined;
+  private writing: Promise<void> = Promise.resolve();
   private readonly debounceMs: number;
+  private readonly lock: FileLockOptions;
 
-  constructor(dataDir: string, opts: UsageStoreOptions & { debounceMs?: number } = {}) {
+  constructor(
+    dataDir: string,
+    opts: UsageStoreOptions & { debounceMs?: number; lock?: FileLockOptions } = {},
+  ) {
     super(opts);
     this.path = join(dataDir, 'usage.json');
     this.debounceMs = opts.debounceMs ?? 500;
+    this.lock = opts.lock ?? {};
+  }
+
+  private async readDisk(): Promise<Record<string, ProfileUsageHistory>> {
+    const file = await readJsonFile<UsageFile>(this.path, { version: 1, profiles: {} }).catch(
+      () => ({ version: 1 as const, profiles: {} }), // a corrupt history is dropped, never fatal
+    );
+    const profiles: Record<string, ProfileUsageHistory> = {};
+    for (const [id, h] of Object.entries(file?.profiles ?? {})) {
+      profiles[id] = {
+        requests: Array.isArray(h?.requests) ? h.requests : [],
+        parks: Array.isArray(h?.parks) ? h.parks : [],
+        samples: Array.isArray(h?.samples) ? h.samples : [],
+      };
+    }
+    return profiles;
   }
 
   protected load(): Promise<Record<string, ProfileUsageHistory>> {
-    if (this.cache) return Promise.resolve(this.cache);
-    this.loading ??= readJsonFile<UsageFile>(this.path, { version: 1, profiles: {} })
-      .catch(() => ({ version: 1 as const, profiles: {} })) // a corrupt history is dropped, never fatal
-      .then((file) => {
-        const profiles: Record<string, ProfileUsageHistory> = {};
-        for (const [id, h] of Object.entries(file?.profiles ?? {})) {
-          profiles[id] = {
-            requests: Array.isArray(h?.requests) ? h.requests : [],
-            parks: Array.isArray(h?.parks) ? h.parks : [],
-            samples: Array.isArray(h?.samples) ? h.samples : [],
-          };
-        }
-        this.cache ??= profiles;
-        return this.cache;
-      });
+    this.loading ??= (async () => {
+      try {
+        const fp = await fileFingerprint(this.path);
+        if (this.cache && fp === this.seen) return this.cache;
+        const gen = this.gen;
+        const map = await this.readDisk();
+        if (gen !== this.gen && this.cache) return this.cache;
+        for (const op of this.ops) this.apply(map, op);
+        this.cache = map;
+        this.seen = fp;
+        return map;
+      } finally {
+        this.loading = undefined;
+      }
+    })();
     return this.loading;
   }
 
-  private snapshot(): UsageFile {
-    return { version: 1, profiles: this.cache ?? {} };
+  protected changed(op: UsageOp, map: Record<string, ProfileUsageHistory>): void {
+    this.ops.push(op);
+    // A re-load may have replaced the map the change was applied to.
+    if (this.cache && this.cache !== map) this.apply(this.cache, op);
+    this.schedule();
   }
 
-  protected changed(): void {
+  private schedule(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.pending = writeJsonFileAtomic(this.path, this.snapshot()).catch(() => {});
+      // A failed write keeps its records: try again after another quiet period.
+      this.write().catch(() => this.schedule());
     }, this.debounceMs);
     this.timer.unref?.();
+  }
+
+  private write(): Promise<void> {
+    const run = async () => {
+      const n = this.ops.length;
+      if (!n) return;
+      const ops = this.ops.slice(0, n);
+      await withFileLock(
+        this.path,
+        async () => {
+          const map = await this.readDisk();
+          for (const op of ops) this.apply(map, op);
+          await writeJsonFileAtomic(this.path, { version: 1, profiles: map } satisfies UsageFile);
+          const fp = await fileFingerprint(this.path);
+          this.ops.splice(0, n);
+          for (const op of this.ops) this.apply(map, op);
+          this.cache = map;
+          this.seen = fp;
+          this.gen++;
+        },
+        this.lock,
+      );
+    };
+    const next = this.writing.then(run, run);
+    this.writing = next.catch(() => {});
+    return next;
   }
 
   /** Force any debounced write to disk now. */
@@ -214,9 +298,8 @@ export class FileUsageStore extends BoundedUsageStore {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
-      await this.pending;
-      await writeJsonFileAtomic(this.path, this.snapshot());
     }
-    await this.pending;
+    await this.writing;
+    await this.write();
   }
 }

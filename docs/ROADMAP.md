@@ -35,6 +35,8 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [ ] Per-profile concurrency limit and request queue.
 - [x] Usage history per profile (`UsageStore`, `<dataDir>/usage.json`, 14 days / 5000 records, counts only): requests and tokens for 1h / 5h / 24h / 7d, parks this week, and a time-left estimate from the utilisation trend (`IronProxy.usageReport()`).
 - [x] File profile and state stores re-read a file another process changed (the CLI, a running `serve` and the tray app share one data directory); a pending state write is never overwritten by a re-read.
+- [x] Multi-process safe file stores: profile, state and usage writes run read-merge-write under a lock file (stale after 10 s) and apply only this process's own changes, so two processes writing at once lose nothing and a delete is not resurrected; tested with two real child processes.
+- [ ] The same lock file around the file vault's read-modify-write (`vault.json`; it already re-reads the file on every call, but two processes setting keys at the same instant can still race).
 - [ ] Usage accounting per profile per window surfaced in `ProfileState.usage` even for providers without headers (the history counts requests and tokens; it does not know the plan's limits).
 - [ ] Time-left estimate from token burn for providers that report no utilisation.
 - [x] Adopt existing logins: `discoverLogins()` finds a signed-in `~/.claude`, `~/.codex`, `~/.grok` (or their home variables) via the CLI's own status command, and `adoptLogin()` uses that directory in place (`cli.adopted`), never copying or deleting it.
@@ -57,7 +59,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] `createElectronIronProxy` (userData dir, `safeStorage` key protector), `installIronProxy` IPC dispatcher with method whitelist, preload `exposeIronProxy`, renderer `getIronClient`, `openLoginTerminal` for win32/darwin/linux.
 - [x] The bridge carries `discoverLogins` / `adoptLogin`, and `IronBridgeError.hint`.
 - [x] The bridge carries `usageReport`.
-- [x] Desktop notifications: `createNotifier({ iron | client, Notification })` for automatic switches, parked and exhausted accounts and sign-ins, with park -> switch coalescing, a per-account throttle and per-kind settings; the pure `notificationFor(event, ctx)` for custom UI.
+- [x] Desktop notifications: `createNotifier({ iron | client, Notification })` for automatic switches, parked and exhausted accounts and sign-ins, with park -> switch coalescing, a per-account throttle and per-kind settings; the pure `notificationFor(event, ctx)` for custom UI. A switch that arrives after its park was already shown (a stream longer than `maxHoldMs`) stays quiet within `throttleMs`. Wired into `examples/electron-host`.
 - [ ] Auto-start and supervise the proxy as a child process from Electron (for hosts that want SDK compatibility inside the app).
 - [ ] Deep-link return from browser login for CLIs that support a custom callback.
 
@@ -84,11 +86,14 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 
 - [x] A ready-made Electron tray app for non-developers: one section per provider with a radio on the account serving next (click = activate), `parked until 3:40 PM` / `needs login` suffixes, tooltip `Iron-Proxy: Claude on "Work Claude Max"`, copy OpenAI / Anthropic base URLs, notifications submenu, start at login, quit.
 - [x] Shares the CLI's data directory (`IRON_PROXY_DATA_DIR` or `~/.iron-proxy`) and file vault; watches `profiles.json` / `state.json` so accounts and parks written by the CLI or a running `serve` show up.
-- [x] Starts the local proxy on 127.0.0.1:8791 (a setting; a free port when taken), writes and removes `proxy.json` like `serve`, and reuses a live `serve` instead of starting a second server.
+- [x] Starts the local proxy on 127.0.0.1:8791 (a setting; a free port when taken), writes and removes `proxy.json` like `serve`, and reuses a live `serve` instead of starting a second server; starts its own when that `serve` goes away (its `proxy.json` removed, or its process gone), and a new port in Settings starts the proxy when none is running.
+- [x] The hidden window reloads only for another process's changes, not after the tray's own writes.
 - [x] Window (420x640, hidden on close) with the proxy URL, `<AccountSwitcher>` with terminal login through a checked IPC channel, the usage panel, and settings.
 - [x] Pure, tested menu / settings / proxy-decision logic; the main-process wiring tested end to end with fake Electron modules; icons drawn by a zero-dependency script.
-- [ ] Installers (Windows, macOS, Linux) built in the release workflow.
-- [ ] Code signing and notarisation.
+- [x] Installers (Windows, macOS, Linux) built in the release workflow: electron-builder (`apps/tray/electron-builder.yml`, NSIS x64 + arm64 per-user, dmg + zip x64 + arm64, AppImage + deb); `.github/workflows/tray-release.yml` on a `tray-v*` tag attaches them and `SHA256SUMS.txt` to a GitHub Release. Packaging proven locally on Windows: `dist:dir` and `dist` both ran, and `dist` wrote `Iron-Proxy-Setup-0.1.0-x64.exe`, `-arm64.exe` and the combined `Iron-Proxy-Setup-0.1.0.exe` (all unsigned); the macOS and Linux builds run only in CI and no release has been cut yet.
+- [x] winget manifests and a Homebrew cask in `packaging/`, filled from a release's `SHA256SUMS.txt` by `scripts/update-manifests.mjs` (tested, idempotent).
+- [ ] First `tray-v*` release cut, winget manifest submitted to microsoft/winget-pkgs, cask published in RealDealCPA-VR/homebrew-tap (manual steps in docs/RELEASING.md).
+- [ ] Code signing and notarisation (today: unsigned on Windows, ad-hoc signed on macOS; first-launch steps in apps/tray/README.md).
 - [ ] Auto-update.
 - [ ] Optional OS-keychain protection of the shared vault key that the CLI can also unlock.
 
@@ -104,8 +109,10 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 
 - [x] CI matrix: Ubuntu / Windows / macOS × Node 20 / 22: typecheck, lint, test, build.
 - [x] Changesets configured; release workflow publishes on `main` when changesets are present.
-- [ ] `NPM_TOKEN` secret added to the repository and first publish of `0.1.0`.
-- [ ] Provenance (`npm publish --provenance`) once the org is set up for it.
+- [x] npm readiness: every publishable package ships README.md and LICENSE, has `publishConfig { access: public, provenance: true }`, repository / homepage / bugs, and per-condition types (`.d.ts` for import, `.d.cts` for require); `pnpm pack:check` (in `pnpm check` and the CI `pack` job) asserts the tarball contents with `npm pack --dry-run`.
+- [x] docs/RELEASING.md: the npm, tray, winget and Homebrew steps.
+- [ ] npm org/scope `iron-proxy` created, `NPM_TOKEN` secret added to the repository, and first publish of `0.1.0` (nothing is published yet).
+- [ ] Provenance verified on the first publish (configured through `publishConfig.provenance`; the release workflow has `id-token: write`).
 - [ ] Signed tags.
 
 ## 8. Documentation

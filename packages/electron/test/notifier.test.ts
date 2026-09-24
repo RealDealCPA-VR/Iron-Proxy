@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createIronProxy,
   MemoryUsageStore,
@@ -570,7 +570,14 @@ describe('createNotifier', () => {
     const src = fakeClient(profiles);
     const { Notification, shown } = fakeNotificationClass();
     const t = fakeClock();
-    const n = createNotifier({ ...base, client: src.client, Notification, clock: t.clock });
+    const onError = vi.fn();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      onError,
+    });
     src.emit({
       type: 'profile.switched',
       provider: 'anthropic',
@@ -580,6 +587,119 @@ describe('createNotifier', () => {
     await n.settled();
     t.advance(120_000);
     expect(shown).toEqual([]);
+    // Silent because it was skipped, not because showing it failed.
+    expect(onError).not.toHaveBeenCalled();
+    n.dispose();
+  });
+
+  it('keeps a switch quiet when its park was already shown after maxHoldMs', async () => {
+    const src = fakeClient(profiles);
+    const { Notification, shown } = fakeNotificationClass();
+    const t = fakeClock();
+    const onError = vi.fn();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      maxHoldMs: 45_000,
+      throttleMs: 60_000,
+      onError,
+    });
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    // A long stream on B: the park is held, then shown at maxHoldMs.
+    src.emit({ type: 'request.started', requestId: 'r1', provider: 'anthropic', profileId: 'b' });
+    await n.settled();
+    t.advance(45_000);
+    expect(shown.map((s) => s.title)).toEqual(['"Work Claude" is resting']);
+    // The stream finishes 50 s after the park and the router announces the switch.
+    t.advance(5_000);
+    src.emit({
+      type: 'profile.switched',
+      provider: 'anthropic',
+      fromProfileId: 'a',
+      toProfileId: 'b',
+      reason: rateLimit,
+    });
+    src.emit({
+      type: 'request.finished',
+      requestId: 'r1',
+      provider: 'anthropic',
+      profileId: 'b',
+      durationMs: 50_000,
+    });
+    await n.settled();
+    t.advance(10_000);
+    expect(shown).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+    n.dispose();
+  });
+
+  it('keeps a late switch without a from account quiet too, and only once', async () => {
+    const src = fakeClient(profiles);
+    const { Notification, shown } = fakeNotificationClass();
+    const t = fakeClock();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      maxHoldMs: 45_000,
+      throttleMs: 60_000,
+    });
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    src.emit({ type: 'request.started', requestId: 'r1', provider: 'anthropic', profileId: 'b' });
+    await n.settled();
+    t.advance(45_000);
+    const sw: IronEvent = {
+      type: 'profile.switched',
+      provider: 'anthropic',
+      toProfileId: 'b',
+      reason: rateLimit,
+    };
+    src.emit(sw);
+    await n.settled();
+    expect(shown).toHaveLength(1);
+    // A later, separate switch is a new incident and shows.
+    t.advance(1_000);
+    src.emit({ ...sw, fromProfileId: 'b', toProfileId: 'a' });
+    await n.settled();
+    expect(shown.map((s) => s.title)).toEqual([
+      '"Work Claude" is resting',
+      'Switched to "Work Claude"',
+    ]);
+    n.dispose();
+  });
+
+  it('shows a late switch when its park was shown longer than throttleMs ago', async () => {
+    const src = fakeClient(profiles);
+    const { Notification, shown } = fakeNotificationClass();
+    const t = fakeClock();
+    const n = createNotifier({
+      ...base,
+      client: src.client,
+      Notification,
+      clock: t.clock,
+      maxHoldMs: 45_000,
+      throttleMs: 60_000,
+    });
+    src.emit({ type: 'profile.parked', profileId: 'a', reason: rateLimit, until: RESET });
+    src.emit({ type: 'request.started', requestId: 'r1', provider: 'anthropic', profileId: 'b' });
+    await n.settled();
+    t.advance(45_000);
+    t.advance(60_000);
+    src.emit({
+      type: 'profile.switched',
+      provider: 'anthropic',
+      fromProfileId: 'a',
+      toProfileId: 'b',
+      reason: rateLimit,
+    });
+    await n.settled();
+    expect(shown.map((s) => s.title)).toEqual([
+      '"Work Claude" is resting',
+      'Switched to "Home Claude"',
+    ]);
     n.dispose();
   });
 
@@ -682,7 +802,8 @@ describe('createNotifier with a real IronProxy', () => {
     });
     const { Notification, shown } = fakeNotificationClass();
     const t = fakeClock(Date.now());
-    const n = createNotifier({ locale: 'en-US', iron, Notification, clock: t.clock });
+    const onError = vi.fn();
+    const n = createNotifier({ locale: 'en-US', iron, Notification, clock: t.clock, onError });
     const events: IronEvent[] = [];
     iron.events.onAny((e) => events.push(e));
     await iron.complete({
@@ -709,6 +830,7 @@ describe('createNotifier with a real IronProxy', () => {
     expect(events.filter((e) => e.type === 'profile.switched')).toHaveLength(2);
     t.advance(10_000);
     expect(shown).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
     n.dispose();
   });
 });

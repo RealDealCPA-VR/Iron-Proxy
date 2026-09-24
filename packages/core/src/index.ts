@@ -19,6 +19,7 @@ export {
 } from './router/router.js';
 export { FileProfileStore, MemoryProfileStore, type ProfileStore } from './store/profile-store.js';
 export { FileStateStore, MemoryStateStore, type StateStore } from './store/state-store.js';
+export { type FileLockOptions } from './store/file-lock.js';
 export {
   FileUsageStore,
   MemoryUsageStore,

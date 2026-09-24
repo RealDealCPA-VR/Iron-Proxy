@@ -18,13 +18,47 @@ Iron-Proxy makes that a non-event. Give your app a list of titled accounts per p
 
 ---
 
+## Install
+
+**The desktop tray app** (Windows, macOS, Linux), for people who do not write code: download the installer for your system from the [GitHub Releases page](https://github.com/RealDealCPA-VR/Iron-Proxy/releases) (tags `tray-v…`; the first one is not cut yet), with a `SHA256SUMS.txt` to check it against. The installers are **not code-signed** yet, so Windows SmartScreen and macOS Gatekeeper warn the first time; [apps/tray/README.md](apps/tray/README.md#install) has the exact first-launch steps.
+
+After the first packaged release is submitted to the package managers (see [docs/RELEASING.md](docs/RELEASING.md)):
+
+```bash
+winget install RealDealCPA.IronProxy                     # Windows
+brew install --cask realdealcpa-vr/tap/iron-proxy        # macOS
+```
+
+**The npm packages** (`iron-proxy` CLI, `@iron-proxy/core`, `/proxy`, `/electron`, `/react`), after the first npm publish:
+
+```bash
+npx iron-proxy setup                                     # the CLI, no install needed
+npm install @iron-proxy/core                             # or /proxy, /electron, /react
+```
+
+Until that first publish, use a checkout (Node 20.11+ and pnpm):
+
+```bash
+git clone https://github.com/RealDealCPA-VR/Iron-Proxy.git && cd Iron-Proxy
+pnpm install && pnpm build
+node packages/cli/dist/cli.js setup                      # the CLI
+pnpm -F @iron-proxy/tray start                           # the tray app (after `pnpm -F @iron-proxy/tray electron-install`)
+```
+
+To use a package in your own app before then, pack it and its `@iron-proxy/*` dependencies from the checkout and install the tarballs together:
+
+```bash
+(cd packages/core && pnpm pack --pack-destination /tmp/iron) && (cd packages/proxy && pnpm pack --pack-destination /tmp/iron)
+npm install /tmp/iron/iron-proxy-core-0.1.0.tgz /tmp/iron/iron-proxy-proxy-0.1.0.tgz
+```
+
 ## For everyone: the tray app
 
 Not a developer? [`apps/tray`](apps/tray) is Iron-Proxy as a small desktop app. It lives in the system tray (the menu bar on macOS) and shows each provider's accounts with a mark on the one in use; click another to switch. It tells you when an account is resting and when it comes back (`Work Claude Max (parked until 3:40 PM)`), sends a desktop notification when it switches for you, and copies the two base URLs (`http://127.0.0.1:8791/v1` for OpenAI-style tools, `http://127.0.0.1:8791` for Anthropic-style ones) so any tool can use your accounts. Its window is the full account switcher: add accounts, sign in, reorder, see usage.
 
 It shares its accounts with the `iron-proxy` command line (the same `~/.iron-proxy` folder), so you can mix the two freely.
 
-To be honest about where it stands: there are no installers yet. They come in the next release step. Today you run it from a checkout with `pnpm -F @iron-proxy/tray start`, which needs the Electron binary (see [apps/tray/README.md](apps/tray/README.md)).
+Installers for Windows (x64, ARM), macOS (Intel, Apple silicon) and Linux (AppImage, deb) are built by the tray release workflow and attached to a GitHub Release for each `tray-v…` tag. To be honest about where it stands: they are not code-signed yet, and no release has been cut so far; until one is, run it from a checkout with `pnpm -F @iron-proxy/tray start` (see [apps/tray/README.md](apps/tray/README.md)).
 
 ## Why people want this
 
@@ -49,6 +83,8 @@ To be honest about where it stands: there are no installers yet. They come in th
 Step-by-step for each: [docs/ADOPTING.md](docs/ADOPTING.md).
 
 ## Sixty seconds
+
+`npx iron-proxy` works after the first npm publish; until then run `node packages/cli/dist/cli.js` from a checkout in its place (see [Install](#install)).
 
 ```bash
 npx iron-proxy setup                                               # guided: checks the CLIs, adopts logins, adds accounts

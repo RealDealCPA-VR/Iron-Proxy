@@ -13,22 +13,33 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "electron-install": "node -e \"delete process.env.ELECTRON_SKIP_BINARY_DOWNLOAD; require('electron/install.js')\"",
-    "start": "node scripts/build.mjs && electron ."
+    "start": "node scripts/build.mjs && electron .",
+    "dist": "node scripts/build.mjs && electron-builder --publish never",
+    "dist:dir": "node scripts/build.mjs && electron-builder --dir --publish never"
   },
-  "dependencies": {
+  "devDependencies": {
     "@iron-proxy/core": "workspace:^",
     "@iron-proxy/electron": "workspace:^",
     "@iron-proxy/proxy": "workspace:^",
     "@iron-proxy/react": "workspace:^",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
     "@testing-library/react": "^16.2.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "electron": "^33.0.0",
+    "electron": "33.4.11",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
-    "jsdom": "^26.0.0"
+    "jsdom": "^26.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "author": {
+    "name": "RealDealCPA",
+    "url": "https://github.com/RealDealCPA-VR"
+  },
+  "homepage": "https://github.com/RealDealCPA-VR/Iron-Proxy/tree/main/apps/tray#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RealDealCPA-VR/Iron-Proxy.git",
+    "directory": "apps/tray"
   }
 }

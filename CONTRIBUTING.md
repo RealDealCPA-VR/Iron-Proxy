@@ -6,7 +6,7 @@ Thanks for helping. Iron-Proxy is small on purpose; the best contributions keep 
 
 ```bash
 pnpm install
-pnpm check          # build + typecheck + lint + test, all packages (build first: dependents typecheck against core's dist)
+pnpm check          # build + typecheck + lint + test + pack:check, all packages (build first: dependents typecheck against core's dist)
 pnpm -F @iron-proxy/core test
 ```
 
@@ -28,6 +28,10 @@ See docs/PROVIDERS.md → "Adding a provider". Add the fake CLI flavour and the 
 ## Style
 
 Prettier and ESLint are configured; `pnpm format` before pushing. TypeScript is strict with `exactOptionalPropertyTypes`, so spread optional properties conditionally rather than assigning `undefined`.
+
+## Releases
+
+How npm packages and tray installers are released (all maintainer steps): [docs/RELEASING.md](docs/RELEASING.md). `pnpm pack:check` checks what each package would put in its npm tarball.
 
 ## Pull requests
 

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ProviderId } from './types.js';
 
@@ -110,7 +110,21 @@ export async function writeJsonFileAtomic(
   } catch {
     /* Windows ignores POSIX modes */
   }
-  await rename(tmp, path);
+  // Windows refuses a rename for a moment while another process has the target
+  // open (a reader, an antivirus scan): retry briefly before giving up.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(tmp, path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')) {
+        await rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 10 + attempt * 5));
+    }
+  }
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {

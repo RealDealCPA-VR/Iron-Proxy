@@ -1,0 +1,21 @@
+# Filled in by scripts/update-manifests.mjs from the release's SHA256SUMS.txt.
+# The all-zero hashes are placeholders until the first packaged release.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: RealDealCPA.IronProxy
+PackageVersion: 0.1.0
+InstallerType: nsis
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/RealDealCPA-VR/Iron-Proxy/releases/download/tray-v0.1.0/Iron-Proxy-Setup-0.1.0-x64.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  - Architecture: arm64
+    InstallerUrl: https://github.com/RealDealCPA-VR/Iron-Proxy/releases/download/tray-v0.1.0/Iron-Proxy-Setup-0.1.0-arm64.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0

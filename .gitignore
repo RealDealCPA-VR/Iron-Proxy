@@ -13,3 +13,4 @@ Thumbs.db
 examples/**/out/
 apps/**/out/
 packages/react/src/styles.generated.ts
+apps/**/release/

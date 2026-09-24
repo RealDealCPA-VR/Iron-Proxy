@@ -1,7 +1,7 @@
-import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Profile } from '../types.js';
 import { readJsonFile, writeJsonFileAtomic } from '../util.js';
+import { fileFingerprint, withFileLock, type FileLockOptions } from './file-lock.js';
 
 /** Persistence for profiles. Implement this to store profiles wherever the host likes. */
 export interface ProfileStore {
@@ -38,12 +38,15 @@ interface ProfilesFile {
 
 /**
  * JSON file store: `<dataDir>/profiles.json`. Writes are atomic and serialised
- * through a promise chain so concurrent puts never interleave.
+ * through a promise chain so concurrent puts in this process never interleave.
  *
  * The file is shared by every process on the same data directory (the CLI, a
- * running `serve`, the tray app), so the cache is re-read whenever the file on
- * disk is no longer the one this store last read or wrote: an account another
- * process added is seen, and a later write here does not drop it.
+ * running `serve`, the tray app), so a write never replays this process's whole
+ * cache over the file: under a lock file (`profiles.json.lock`) it re-reads the
+ * file, applies only this process's change (the profile put, or the id deleted)
+ * and writes the result. A read re-loads the file whenever it changed on disk
+ * since this store last read or wrote it, so an account another process added
+ * is seen, and one it deleted is not brought back.
  */
 export class FileProfileStore implements ProfileStore {
   readonly path: string;
@@ -51,41 +54,83 @@ export class FileProfileStore implements ProfileStore {
   private cache: Map<string, Profile> | undefined;
   /** Identity of the file the cache came from (or was last written to). */
   private seen: string | undefined;
+  /** Identity of the file this store last wrote. */
+  private lastWritten: string | undefined;
+  /** File versions written elsewhere that this store has read. */
+  private external = 0;
+  /** This process's changes not yet on disk: puts by id, and deleted ids. */
+  private readonly dirty = new Map<string, Profile>();
+  private readonly deleted = new Set<string>();
+  private readonly lock: FileLockOptions;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, opts: { lock?: FileLockOptions } = {}) {
     this.path = join(dataDir, 'profiles.json');
+    this.lock = opts.lock ?? {};
   }
 
-  /** Changes on every atomic replace: a rename gives a new inode, and mtime/size move with edits. */
-  private async fingerprint(): Promise<string> {
-    try {
-      const st = await stat(this.path);
-      return `${st.ino}:${st.mtimeMs}:${st.size}`;
-    } catch {
-      return 'missing';
-    }
+  private async readDisk(): Promise<Map<string, Profile>> {
+    const file = await readJsonFile<ProfilesFile>(this.path, { version: 1, profiles: [] });
+    return new Map((file.profiles ?? []).map((p) => [p.id, p]));
+  }
+
+  private overlay(map: Map<string, Profile>): Map<string, Profile> {
+    for (const id of this.deleted) map.delete(id);
+    for (const [id, p] of this.dirty) map.set(id, structuredClone(p));
+    return map;
   }
 
   private async load(): Promise<Map<string, Profile>> {
-    const fp = await this.fingerprint();
+    const fp = await fileFingerprint(this.path);
     if (this.cache && fp === this.seen) return this.cache;
-    const file = await readJsonFile<ProfilesFile>(this.path, { version: 1, profiles: [] });
-    this.cache = new Map(file.profiles.map((p) => [p.id, p]));
+    this.noteVersion(fp);
+    this.cache = this.overlay(await this.readDisk());
     this.seen = fp;
     return this.cache;
   }
 
-  private async flush(): Promise<void> {
-    const map = await this.load();
-    const file: ProfilesFile = { version: 1, profiles: [...map.values()] };
-    await writeJsonFileAtomic(this.path, file);
-    this.seen = await this.fingerprint();
+  /** Re-read the file under the lock, apply this process's changes, write it back. */
+  private async commit(): Promise<void> {
+    try {
+      await withFileLock(
+        this.path,
+        async () => {
+          this.noteVersion(await fileFingerprint(this.path));
+          const merged = this.overlay(await this.readDisk());
+          const file: ProfilesFile = { version: 1, profiles: [...merged.values()] };
+          await writeJsonFileAtomic(this.path, file);
+          this.cache = merged;
+          this.seen = this.lastWritten = await fileFingerprint(this.path);
+        },
+        this.lock,
+      );
+    } catch (err) {
+      this.cache = undefined; // re-read: the change did not land
+      throw err;
+    } finally {
+      this.dirty.clear();
+      this.deleted.clear();
+    }
+  }
+
+  /** Count a version of the file that neither this store wrote nor had read already. */
+  private noteVersion(fp: string): void {
+    if (fp !== 'missing' && fp !== this.seen && fp !== this.lastWritten) this.external++;
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.chain.then(fn, fn);
     this.chain = next.catch(() => {});
     return next;
+  }
+
+  /**
+   * How many versions of the file written by another process (the CLI, a
+   * running `serve`, another app) this store has read so far. A watcher can
+   * compare it before and after a reload to tell another process's changes from
+   * this process's own writes.
+   */
+  get externalWrites(): number {
+    return this.external;
   }
 
   list(): Promise<Profile[]> {
@@ -101,14 +146,16 @@ export class FileProfileStore implements ProfileStore {
   }
   put(profile: Profile): Promise<void> {
     return this.serial(async () => {
-      (await this.load()).set(profile.id, structuredClone(profile));
-      await this.flush();
+      this.deleted.delete(profile.id);
+      this.dirty.set(profile.id, structuredClone(profile));
+      await this.commit();
     });
   }
   delete(id: string): Promise<void> {
     return this.serial(async () => {
-      (await this.load()).delete(id);
-      await this.flush();
+      this.dirty.delete(id);
+      this.deleted.add(id);
+      await this.commit();
     });
   }
 }

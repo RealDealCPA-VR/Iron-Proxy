@@ -1,0 +1,68 @@
+# Installers for the Iron-Proxy tray app. `pnpm -F @iron-proxy/tray dist` builds the ones for
+# the current OS; .github/workflows/tray-release.yml builds all of them and uploads them.
+# Builds are UNSIGNED (Windows) and ad-hoc signed (macOS): see apps/tray/README.md.
+appId: com.realdealcpa.ironproxy
+productName: Iron-Proxy
+copyright: Copyright (c) RealDealCPA
+directories:
+  output: release
+  buildResources: assets
+# Everything the app needs is bundled into out/ by scripts/build.mjs (esbuild), so no
+# node_modules are packaged: the package has no runtime dependencies on purpose.
+files:
+  - out/**/*
+  - '!out/**/*.map'
+  - assets/**/*
+  - package.json
+asar: true
+publish: null
+
+win:
+  icon: assets/icon-512.png
+  executableName: Iron-Proxy
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+nsis:
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Iron-Proxy
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+
+mac:
+  icon: assets/icon-512.png
+  category: public.app-category.productivity
+  # Ad-hoc signature only (no Apple Developer ID): Apple Silicon refuses to run unsigned code,
+  # and ad-hoc signing with the hardened runtime off is what lets it start.
+  identity: '-'
+  hardenedRuntime: false
+  notarize: false
+  artifactName: ${productName}-${version}-${arch}-mac.${ext}
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  extendInfo:
+    LSUIElement: true
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  writeUpdateInfo: false
+
+linux:
+  icon: assets/icon-512.png
+  executableName: iron-proxy
+  category: Utility
+  synopsis: Account switching for AI subscriptions, from the system tray
+  maintainer: RealDealCPA <RealDealCPA-VR@users.noreply.github.com>
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+appImage:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+deb:
+  artifactName: iron-proxy_${version}_${arch}.${ext}

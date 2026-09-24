@@ -9,6 +9,7 @@ import {
   parseDescriptor,
   PROXY_DESCRIPTOR_FILE,
   readDescriptor,
+  recheckReusedProxy,
   removeDescriptorIfOwned,
   writeDescriptor,
   type ProxyDescriptor,
@@ -43,6 +44,40 @@ describe('decideProxy', () => {
     expect(decideProxy({ ...other, pid: 7 }, () => true, 7)).toEqual({
       action: 'start',
       stale: true,
+    });
+  });
+});
+
+describe('recheckReusedProxy', () => {
+  it('keeps using the proxy while proxy.json still names it and it is alive', () => {
+    expect(recheckReusedProxy(other, { ...other }, () => true, 1)).toEqual({ action: 'keep' });
+  });
+
+  it('starts its own when proxy.json is gone', () => {
+    expect(recheckReusedProxy(other, undefined, () => true, 1)).toEqual({ action: 'start' });
+  });
+
+  it('starts its own when the process behind proxy.json has exited', () => {
+    const asked: number[] = [];
+    const alive = (pid: number) => {
+      asked.push(pid);
+      return false;
+    };
+    expect(recheckReusedProxy(other, other, alive, 1)).toEqual({ action: 'start' });
+    expect(asked).toEqual([4242]);
+  });
+
+  it('follows proxy.json when it now names another live proxy', () => {
+    const next = { url: 'http://127.0.0.1:9999', token: 'n', pid: 5151 };
+    expect(recheckReusedProxy(other, next, () => true, 1)).toEqual({
+      action: 'reuse',
+      descriptor: next,
+    });
+  });
+
+  it('starts its own when proxy.json now names this very process', () => {
+    expect(recheckReusedProxy(other, { ...other, pid: 7 }, () => true, 7)).toEqual({
+      action: 'start',
     });
   });
 });

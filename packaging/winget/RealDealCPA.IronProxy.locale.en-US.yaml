@@ -1,0 +1,33 @@
+# Filled in by scripts/update-manifests.mjs; submitted by hand to microsoft/winget-pkgs.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: RealDealCPA.IronProxy
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: RealDealCPA
+PublisherUrl: https://github.com/RealDealCPA-VR
+PublisherSupportUrl: https://github.com/RealDealCPA-VR/Iron-Proxy/issues
+Author: RealDealCPA
+PackageName: Iron-Proxy
+PackageUrl: https://github.com/RealDealCPA-VR/Iron-Proxy
+License: MIT
+LicenseUrl: https://github.com/RealDealCPA-VR/Iron-Proxy/blob/main/LICENSE
+Copyright: Copyright (c) RealDealCPA
+ShortDescription: Switch between your AI subscription accounts from the system tray, with automatic same-provider failover.
+Description: |-
+  Iron-Proxy keeps a list of titled accounts per AI provider (Claude, ChatGPT/Codex, Gemini, Grok, API keys).
+  When one account hits its usage limit, the next account of the same provider takes over, and the first one
+  comes back when its window resets. A local proxy on 127.0.0.1 lets any OpenAI- or Anthropic-compatible tool
+  use your accounts.
+Moniker: iron-proxy
+Tags:
+  - ai
+  - anthropic
+  - claude
+  - openai
+  - proxy
+  - failover
+  - tray
+ReleaseNotesUrl: https://github.com/RealDealCPA-VR/Iron-Proxy/releases/tag/tray-v0.1.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

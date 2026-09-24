@@ -9,6 +9,7 @@ export default tseslint.config(
       '**/node_modules/**',
       'examples/**/out/**',
       'apps/**/out/**',
+      'apps/**/release/**',
     ],
   },
   js.configs.recommended,
