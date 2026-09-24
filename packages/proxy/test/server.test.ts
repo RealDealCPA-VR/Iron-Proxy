@@ -479,3 +479,113 @@ describe('/v1/models and control routes', () => {
     expect(health.headers.get('access-control-allow-origin')).toBe('http://x');
   });
 });
+
+describe('x-iron-resume: continue a cut-off answer on the next account', () => {
+  const stream = { model: 'claude-x', max_tokens: 64, stream: true };
+  const msgs = [{ role: 'user', content: 'hi' }];
+
+  it('Anthropic route: one continuous answer, a resumed comment, and a trimmed prefill upstream', async () => {
+    const { a, b } = await twoAnthropic();
+    h.upstream.cutMidStream.add('key-A');
+    const res = await post('/v1/messages', { ...stream, messages: msgs }, { 'x-iron-resume': '1' });
+    expect(res.status).toBe(200);
+    const { comments, frames } = await readSse(res);
+    expect(comments).toContain(`iron switched ${a.id} -> ${b.id} resumed`);
+    const events = frames.map((f) => JSON.parse(f.data) as Record<string, unknown>);
+    expect(events.filter((e) => e.type === 'message_start')).toHaveLength(1);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    const text = events
+      .map((e) => (e.type === 'content_block_delta' ? (e.delta as { text?: string }).text : ''))
+      .join('');
+    expect(text).toBe('served served by key-B');
+    expect(events.at(-1)?.type).toBe('message_stop');
+
+    // B was asked to continue A's partial text, as an assistant prefill without trailing space.
+    const cont = h.upstream.calls.find((c) => c.key === 'key-B')!.body as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(cont.messages).toHaveLength(2);
+    expect(cont.messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'served' }],
+    });
+    expect((await h.iron.allStates())[a.id]?.status).toBe('parked');
+  });
+
+  it('OpenAI route: resumed comment and continuous chunks; without the header it stays STREAM_INTERRUPTED', async () => {
+    const { a, b } = await twoAnthropic();
+    h.upstream.cutMidStream.add('key-A');
+    const res = await post(
+      '/v1/chat/completions',
+      { model: 'claude-x', stream: true, messages: msgs },
+      { 'x-iron-resume': '1' },
+    );
+    const { comments, frames } = await readSse(res);
+    expect(comments).toContain(`iron switched ${a.id} -> ${b.id} resumed`);
+    const chunks = frames
+      .slice(0, -1)
+      .map((f) => JSON.parse(f.data) as { choices?: Array<{ delta: { content?: string } }> });
+    expect(chunks.map((c) => c.choices?.[0]?.delta.content ?? '').join('')).toBe(
+      'served served by key-B',
+    );
+
+    // Default (no header): today's behaviour.
+    for (const p of await h.iron.listProfiles()) await h.iron.unpark(p.id);
+    h.upstream.cutMidStream.add('key-A');
+    const plain = await post('/v1/chat/completions', {
+      model: 'claude-x',
+      stream: true,
+      messages: msgs,
+    });
+    const out = await readSse(plain);
+    expect(out.comments.some((c) => c.includes('resumed'))).toBe(false);
+    const err = out.frames.find((f) => f.data.includes('STREAM_INTERRUPTED'));
+    expect(err).toBeDefined();
+  });
+
+  it('rejects a malformed x-iron-resume value', async () => {
+    await twoAnthropic();
+    const res = await post(
+      '/v1/messages',
+      { ...stream, messages: msgs },
+      { 'x-iron-resume': 'maybe' },
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /iron/usage', () => {
+  it('reports requests, tokens and parks per profile, filters by profileId, and needs the token', async () => {
+    const { a, b } = await twoAnthropic();
+    h.upstream.exhaustNext.add('key-A');
+    const res = await post('/v1/messages', {
+      model: 'claude-x',
+      max_tokens: 50,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(res.headers.get('x-iron-profile')).toBe(b.id);
+    await res.text();
+
+    expect((await fetch(`${h.url}/iron/usage`)).status).toBe(401);
+    const all = await fetch(`${h.url}/iron/usage`, { headers: auth() });
+    expect(all.status).toBe(200);
+    const reports = (await all.json()) as Array<{
+      profileId: string;
+      parks7d: number;
+      windows: Record<string, { requests: number; inputTokens: number; outputTokens: number }>;
+    }>;
+    expect(reports.map((r) => r.profileId)).toEqual([a.id, b.id]);
+    expect(reports[0]).toMatchObject({ parks7d: 1 });
+    expect(reports[0]?.windows['1h']?.requests).toBe(0);
+    expect(reports[1]?.windows['1h']).toEqual({ requests: 1, inputTokens: 3, outputTokens: 2 });
+
+    const one = await fetch(`${h.url}/iron/usage?profileId=${encodeURIComponent(b.id)}`, {
+      headers: auth(),
+    });
+    expect(((await one.json()) as Array<{ profileId: string }>).map((r) => r.profileId)).toEqual([
+      b.id,
+    ]);
+    const missing = await fetch(`${h.url}/iron/usage?profileId=nope`, { headers: auth() });
+    expect(missing.status).toBe(404);
+  });
+});

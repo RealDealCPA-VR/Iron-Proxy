@@ -178,3 +178,11 @@ export function toClientError(err: unknown): ClientError {
   }
   return { message: String(err) };
 }
+
+/** Compact count for small UI: 950, 1.2k, 34k, 3.4M. */
+export function formatCount(n: number): string {
+  if (!Number.isFinite(n) || n < 1_000) return String(Number.isFinite(n) ? Math.round(n) : 0);
+  const trim = (s: string) => (s.endsWith('.0') ? s.slice(0, -2) : s);
+  if (n < 1_000_000) return `${trim((n / 1_000).toFixed(n < 10_000 ? 1 : 0))}k`;
+  return `${trim((n / 1_000_000).toFixed(1))}M`;
+}

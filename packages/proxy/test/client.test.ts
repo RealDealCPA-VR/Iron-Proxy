@@ -60,6 +60,10 @@ describe('HttpIronClient', () => {
     expect((await client.refreshStatus(a.id))[0]?.profileId).toBe(a.id);
     expect(await client.listModels(a.id)).toEqual([]);
     expect((await client.doctor()).length).toBe(4);
+    const usage = await client.usageReport();
+    expect(usage.map((r) => r.profileId).sort()).toEqual([a.id, b.id].sort());
+    expect(usage[0]?.windows['7d']).toEqual({ requests: 0, inputTokens: 0, outputTokens: 0 });
+    expect((await client.usageReport(b.id)).map((r) => r.profileId)).toEqual([b.id]);
     await client.unpark(a.id);
     await client.logout(b.id);
 

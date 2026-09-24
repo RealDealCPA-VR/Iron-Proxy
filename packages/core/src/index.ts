@@ -8,9 +8,36 @@ export {
   PROVIDER_SHORT_NAMES,
   type IronProxyOptions,
 } from './manager.js';
-export { Router, type RouterDeps } from './router/router.js';
+export {
+  Router,
+  CONTINUE_INSTRUCTION,
+  USAGE_STALE_MS,
+  continuationRequest,
+  isUsageFresh,
+  isUsageHot,
+  type RouterDeps,
+} from './router/router.js';
 export { FileProfileStore, MemoryProfileStore, type ProfileStore } from './store/profile-store.js';
 export { FileStateStore, MemoryStateStore, type StateStore } from './store/state-store.js';
+export {
+  FileUsageStore,
+  MemoryUsageStore,
+  pruneUsageHistory,
+  USAGE_MAX_AGE_MS,
+  USAGE_MAX_RECORDS,
+  type UsageStore,
+  type UsageStoreOptions,
+} from './store/usage-store.js';
+export {
+  buildUsageReport,
+  currentWindowSamples,
+  estimateTimeLeft,
+  ESTIMATE_MEDIUM_SAMPLES,
+  ESTIMATE_MEDIUM_SPAN_MS,
+  ESTIMATE_MIN_SAMPLES,
+  SAMPLE_WINDOW_WITHOUT_RESET_MS,
+  USAGE_WINDOW_MS,
+} from './usage/report.js';
 export {
   FileVault,
   MemoryVault,

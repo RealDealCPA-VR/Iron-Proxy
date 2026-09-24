@@ -10,6 +10,7 @@ import type {
   ProfilePatch,
   ProfileState,
   ProviderId,
+  UsageReport,
 } from './types.js';
 
 export interface ProviderInfo {
@@ -55,6 +56,11 @@ export interface IronClient {
   discoverLogins(): Promise<DiscoveredLogin[]>;
   /** Make a profile that uses an existing CLI login in place. No second login, nothing copied. */
   adoptLogin(input: AdoptLoginInput): Promise<Profile>;
+  /**
+   * Requests, tokens and parks per profile over recent windows, with a time-left
+   * estimate when the utilisation trend supports one. One profile with `profileId`.
+   */
+  usageReport(profileId?: string): Promise<UsageReport[]>;
   onEvent(listener: (event: IronEvent) => void): () => void;
 }
 
@@ -131,6 +137,9 @@ export class LocalIronClient implements IronClient {
   adoptLogin(input: AdoptLoginInput) {
     return this.iron.adoptLogin(input);
   }
+  usageReport(profileId?: string) {
+    return this.iron.usageReport(profileId ? { profileId } : {});
+  }
   onEvent(listener: (event: IronEvent) => void): () => void {
     return this.iron.events.onAny(listener);
   }
@@ -157,6 +166,7 @@ export const IRON_CLIENT_METHODS = [
   'doctor',
   'discoverLogins',
   'adoptLogin',
+  'usageReport',
 ] as const satisfies ReadonlyArray<Exclude<keyof IronClient, 'onEvent'>>;
 
 export type IronClientMethod = (typeof IRON_CLIENT_METHODS)[number];

@@ -90,6 +90,7 @@ Headers you may add:
 | ------------------------------- | ------------------------------------------------------------------- |
 | `x-iron-provider: anthropic`    | Force a provider when the model name is not recognisable.           |
 | `x-iron-profile: <id>`          | Start on this account (failover still applies within its provider). |
+| `x-iron-resume: 1`              | Continue a stream cut off by a limit on the next account (opt-in).  |
 | `authorization: Bearer <token>` | Required on `/iron/*` control routes.                               |
 
 Manage accounts from the terminal (`iron-proxy profiles add …`, `iron-proxy login <id>`), from the control API (`/iron/profiles`, `/iron/events`), or embed the React switcher with the HTTP client:

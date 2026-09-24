@@ -11,9 +11,9 @@ const { url, token } = await proxy.listen();
 // OpenAI SDK:    baseURL `${url}/v1`      Anthropic SDK: baseURL url
 ```
 
-Headers: `x-iron-provider` forces a provider, `x-iron-profile` pins an account, `authorization: Bearer <token>` unlocks `/iron/*`.
+Headers: `x-iron-provider` forces a provider, `x-iron-profile` pins an account, `x-iron-resume: 1` continues a streamed answer on the next account when a limit cuts it off mid-stream (the switch comment then ends in `resumed`; `0` turns a policy default off), `authorization: Bearer <token>` unlocks `/iron/*`.
 
-Error bodies keep each dialect's shape and add an `iron` object: `{ code, retryable, details, hint }`, where `hint` is one sentence telling the user what to do next. `GET /iron/discover` lists vendor CLIs already signed in on this machine; `POST /iron/adopt` (`{ provider, home, title? }`) turns one into a profile in place.
+Error bodies keep each dialect's shape and add an `iron` object: `{ code, retryable, details, hint }`, where `hint` is one sentence telling the user what to do next. `GET /iron/discover` lists vendor CLIs already signed in on this machine; `POST /iron/adopt` (`{ provider, home, title? }`) turns one into a profile in place. `GET /iron/usage[?profileId=]` returns the usage report (requests and tokens per window, parks this week, the time-left estimate when there is one); `HttpIronClient.usageReport(profileId?)` calls it.
 
 The HTTP client implements the same `IronClient` the React switcher and the Electron bridge use:
 

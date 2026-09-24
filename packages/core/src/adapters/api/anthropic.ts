@@ -8,7 +8,8 @@ import {
   type AnthropicResponse,
   type AnthropicStreamEvent,
 } from '../../translate/anthropic.js';
-import type { AttemptContext, Lane, LaneResponse } from '../types.js';
+import { LaneQuotaSignal, type AttemptContext, type Lane, type LaneResponse } from '../types.js';
+import { redactSecrets } from '../../util.js';
 import type { Vault } from '../../vault/vault.js';
 import { joinUrl, postJson, requireKey } from './shared.js';
 
@@ -74,8 +75,22 @@ export class AnthropicApiLane implements Lane {
       }
       for (const out of tr.translate(ev)) {
         if (out.type === 'finish') finished = true;
-        if (out.type === 'error')
+        if (out.type === 'error') {
+          // A limit announced mid-stream is the account's problem, not the request's.
+          const kind =
+            out.error.name === 'rate_limit_error'
+              ? 'rate-limit'
+              : out.error.name === 'overloaded_error'
+                ? 'overloaded'
+                : undefined;
+          if (kind)
+            throw new LaneQuotaSignal({
+              kind,
+              source: 'body',
+              message: redactSecrets(out.error.message).slice(0, 240),
+            });
           throw new ProviderError(out.error.message, { details: { event: ev } });
+        }
         yield out;
       }
     }

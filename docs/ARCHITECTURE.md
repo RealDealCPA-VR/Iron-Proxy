@@ -12,6 +12,7 @@ Iron-Proxy is one data model, one router, and adapters that are mostly data. Thi
                                    │ IronProxy (manager)                                        │
                                    │   ├─ ProfileStore   profiles.json   (title, provider, lane, order) │
                                    │   ├─ StateStore     state.json      (parkedUntil, usage, served)   │
+                                   │   ├─ UsageStore     usage.json      (requests, parks, samples; 14 d) │
                                    │   ├─ Vault          vault.json + vault.key (AES-256-GCM)           │
                                    │   ├─ AdapterRegistry                                              │
                                    │   │    anthropic ─ api-key lane ─ Messages API                    │
@@ -64,6 +65,9 @@ A `CliSpec` is a small object: binary name, the env var for the home dir, the ar
 <dataDir>/
   profiles.json      profiles (no secrets)
   state.json         runtime state, safe to delete
+  usage.json         usage history per profile (UsageStore): finished requests (time, duration, token counts),
+                     parks (time, kind, until) and utilisation samples (time, utilisation, resetAt).
+                     Counts and timestamps only; kept 14 days, at most 5000 records per profile; safe to delete
   vault.json         AES-256-GCM entries, ref-bound AAD
   vault.key          master key; in Electron wrapped by safeStorage (DPAPI / Keychain / libsecret)
   cli-homes/<provider>/<profileId>/   isolated vendor CLI home per subscription account
@@ -76,6 +80,12 @@ An **adopted** profile (`cli.adopted: true`, from `adoptLogin`) points at a dire
 
 Default `dataDir` is `~/.iron-proxy` (or `IRON_PROXY_DATA_DIR`). Electron hosts get `<userData>/iron-proxy`. Two apps that want to _share_ accounts point at the same `dataDir`; two that want isolation do not.
 
+## Usage history
+
+The manager feeds a `UsageStore` from its own event stream and one router hook: every `request.finished` adds a request record (time, `durationMs`, the input / output / cache-read token counts the provider reported, when it reported them), every `profile.parked` adds a park (time, signal kind, `until`), and `Router.onUsage()` (called after each usage snapshot a lane reports is stored) adds a utilisation sample (time, `utilisation`, `resetAt`) when the snapshot carries a utilisation. No prompt text, output, secret, title or email is ever recorded. The file store prunes on write: records older than 14 days go, then the oldest records until at most 5000 remain per profile. Deleting a profile deletes its history.
+
+`IronProxy.usageReport()` builds, per profile, requests and tokens for the last 1h / 5h / 24h / 7d, parks in the last 7 days and the last park time, the latest utilisation of the **current window** (samples sharing the latest sample's `resetAt` while that is still ahead, or, without a `resetAt`, samples from the last hour), and an estimate of the minutes left at this pace. The estimate is a least-squares line through the current window's samples: at least three samples and a positive slope, `minutesLeft = (1 - latest) / slopePerMinute`, capped at the minutes until `resetAt`; `confidence: 'medium'` with six or more samples spanning ten minutes or more, else `'low'`. With fewer samples, a flat or falling trend, or a stale window there is no estimate at all. It reads local history only; nothing is fetched to build it.
+
 ## Errors and hints
 
 Every failure is an `IronProxyError` with a stable `code`, `retryable`, `details` and a `hint`: one imperative sentence telling the user what to do next. `DEFAULT_HINTS` covers every code; raisers that know more (the provider, the profile title, the missing binary's install command, the local reset time) pass their own. Hints pass through `sanitizeHint` (secret redaction plus email scrubbing) in the constructor, so nothing a caller puts in one can leak a key or an address. `toJSON()` / `serializeError()` carry the hint to events, the proxy's `iron` error object, the Electron bridge and the React banner.
@@ -85,7 +95,7 @@ Every failure is an `IronProxyError` with a stable `code`, `retryable`, `details
 - **New provider**: register a `ProviderAdapter` with `registry.register(...)`. An OpenAI-compatible API needs only a base URL.
 - **New CLI**: write a `CliSpec` and wrap it in `new CliLane(spec)`. About sixty lines. Add `defaultHome(env)` only once the CLI's default state directory is verified, so its existing logins can be adopted.
 - **OAuth lane**: implement `Lane` with `kind: 'oauth'`, call `registry.addLane(provider, lane)`, create profiles with `lane: 'oauth', oauth: { extension: '<your name>' }`.
-- **Storage**: implement `ProfileStore`, `StateStore` or `Vault`. Memory versions ship for tests.
+- **Storage**: implement `ProfileStore`, `StateStore`, `UsageStore` or `Vault`. Memory versions ship for tests.
 - **Key protection**: implement `KeyProtector` (two functions). The Electron package ships the `safeStorage` one.
 
 ## What is deliberately not here

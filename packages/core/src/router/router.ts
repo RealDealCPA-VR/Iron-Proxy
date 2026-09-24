@@ -44,6 +44,103 @@ interface Attempt {
   profile: Profile;
   ctx: AttemptContext;
   release(): void;
+  /** Set when a nearly-full account ahead of this one was deferred (pre-emption). */
+  preempted?: QuotaSignal;
+}
+
+/** Usage with no reset time is ignored once it is this old. */
+export const USAGE_STALE_MS = 10 * 60_000;
+
+/** The user turn appended to a continuation request on every lane except Anthropic's API. */
+export const CONTINUE_INSTRUCTION =
+  'Continue exactly where you stopped. Do not repeat any text you already wrote.';
+
+/**
+ * Whether a usage snapshot still describes the current window: its `resetAt` is
+ * ahead of `now`, or (without one) it was observed in the last ten minutes.
+ */
+export function isUsageFresh(usage: UsageSnapshot, now: number): boolean {
+  if (usage.resetAt !== undefined) {
+    const reset = Date.parse(usage.resetAt);
+    return !Number.isNaN(reset) && reset > now;
+  }
+  const seen = Date.parse(usage.observedAt);
+  return !Number.isNaN(seen) && now - seen <= USAGE_STALE_MS;
+}
+
+/**
+ * Whether an account is 'hot': its fresh usage says at least `threshold` of the
+ * window is used and the window's reset is still ahead. A threshold of 1 or more
+ * means pre-emption is off.
+ */
+export function isUsageHot(
+  usage: UsageSnapshot | undefined,
+  threshold: number,
+  now: number,
+): boolean {
+  if (!usage || !(threshold < 1)) return false;
+  if (usage.resetAt === undefined || !isUsageFresh(usage, now)) return false;
+  return usage.utilisation !== undefined && usage.utilisation >= threshold;
+}
+
+/**
+ * The request that continues a cut-off answer: the original request plus the
+ * partial text as an assistant turn. The Anthropic API lane continues an
+ * assistant prefill natively (trailing whitespace trimmed, which it requires);
+ * every other lane also gets a user turn asking it to carry on.
+ */
+export function continuationRequest(
+  req: UnifiedRequest,
+  partial: string,
+  profile: Pick<Profile, 'provider' | 'lane'>,
+): UnifiedRequest {
+  if (profile.provider === 'anthropic' && profile.lane === 'api-key') {
+    const text = partial.trimEnd();
+    const messages = [...req.messages];
+    const last = messages[messages.length - 1];
+    if (last?.role === 'assistant')
+      messages[messages.length - 1] = {
+        ...last,
+        content: [...last.content, { type: 'text', text }],
+      };
+    else messages.push({ role: 'assistant', content: [{ type: 'text', text }] });
+    return { ...req, messages };
+  }
+  return {
+    ...req,
+    messages: [
+      ...req.messages,
+      { role: 'assistant', content: [{ type: 'text', text: partial }] },
+      { role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] },
+    ],
+  };
+}
+
+function streamInterrupted(profile: Profile, signal: QuotaSignal): IronProxyError {
+  return new IronProxyError(
+    'STREAM_INTERRUPTED',
+    `Account "${profile.title}" hit a limit mid-stream. Resend to continue on the next account.`,
+    {
+      retryable: true,
+      details: { profileId: profile.id, signal },
+      hint: 'Resend; the next account will take it.',
+    },
+  );
+}
+
+function clockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+/** Why a request skipped a nearly-full account. Carries no secrets and no account names. */
+function preemptSignal(usage: UsageSnapshot): QuotaSignal {
+  const pct = Math.round((usage.utilisation ?? 1) * 100);
+  return {
+    kind: 'rate-limit',
+    source: 'usage',
+    message: `Switched early: ${pct}% of the window used${usage.resetAt ? `, resets ${clockTime(usage.resetAt)}` : ''}`,
+    ...(usage.resetAt ? { resetAt: usage.resetAt } : {}),
+  };
 }
 
 /**
@@ -59,6 +156,9 @@ export class Router {
   private readonly clock: Clock;
   private readonly fetch: FetchLike;
   private readonly activeByProvider = new Map<ProviderId, string>();
+  /** Usage writes in flight per profile, so a later state write never overwrites them. */
+  private readonly usageWrites = new Map<string, Promise<void>>();
+  private readonly usageListeners = new Set<(profileId: string, usage: UsageSnapshot) => void>();
 
   constructor(private readonly deps: RouterDeps) {
     this.policy = { ...DEFAULT_POLICY, ...(deps.policy ?? {}) };
@@ -95,7 +195,7 @@ export class Router {
       try {
         const lane = this.deps.registry.laneFor(profile);
         const res = await this.withOverloadRetry(provider, profile, () => lane.complete(req, ctx));
-        await this.markServed(profile, provider);
+        await this.markServed(profile, provider, attempt.preempted ?? lastSignal);
         const out: UnifiedResponse = { ...res, provider, profileId: profile.id };
         if (!opts.includeRaw) delete out.raw;
         this.deps.emitter.emit({
@@ -134,16 +234,37 @@ export class Router {
     const tried: string[] = [];
     let lastSignal: QuotaSignal | undefined;
     let previous: string | undefined;
+    const resume =
+      !opts.strict && (opts.resumeInterrupted ?? this.policyFor(provider).resumeInterrupted);
+    /** Every text delta the caller has seen, across accounts (the resume prefill). */
+    let sentText = '';
+    /** Tool calls started but not yet ended: a cut inside one cannot be continued. */
+    const openTools = new Set<string>();
+    /** Set while an answer cut off mid-stream waits for the next account to continue it. */
+    let interrupted: { profile: Profile; signal: QuotaSignal } | undefined;
 
     for (;;) {
       const attempt = await this.nextAttempt(provider, opts, tried);
       if (!attempt) {
+        if (interrupted) {
+          // Resume found nobody left: the caller gets today's retryable error.
+          const e = streamInterrupted(interrupted.profile, interrupted.signal);
+          this.deps.emitter.emit({
+            type: 'request.failed',
+            requestId,
+            provider,
+            error: e.toJSON(),
+          });
+          yield { type: 'error', error: e.toJSON() };
+          return;
+        }
         const err = await this.exhausted(provider, tried, lastSignal);
         yield { type: 'error', error: serializeError(err) };
         return;
       }
       const { profile, ctx } = attempt;
       tried.push(profile.id);
+      const attemptReq = interrupted ? continuationRequest(req, sentText, profile) : req;
       const startedAt = this.clock.now();
       this.deps.emitter.emit({
         type: 'request.started',
@@ -158,10 +279,24 @@ export class Router {
         let overloads = 0;
         for (;;) {
           try {
-            for await (const ev of lane.stream(req, ctx)) {
+            for await (const ev of lane.stream(attemptReq, ctx)) {
               const full = (
                 ev.type === 'start' ? { ...ev, provider, profileId: profile.id } : ev
               ) as StreamEvent;
+              if (full.type === 'start' && interrupted) {
+                // The continuation: announce the switch, swallow its second `start`.
+                const from = interrupted;
+                interrupted = undefined;
+                emitted = true;
+                yield {
+                  type: 'switched',
+                  fromProfileId: from.profile.id,
+                  toProfileId: profile.id,
+                  reason: lastSignal ?? from.signal,
+                  resumed: true,
+                };
+                continue;
+              }
               if (full.type === 'start' && previous) {
                 yield {
                   type: 'switched',
@@ -171,6 +306,9 @@ export class Router {
                 };
               }
               if (full.type === 'usage') usage = full.usage;
+              else if (full.type === 'text') sentText += full.delta;
+              else if (full.type === 'tool_call_start') openTools.add(full.id);
+              else if (full.type === 'tool_call_end') openTools.delete(full.id);
               emitted = true;
               yield full;
             }
@@ -189,7 +327,7 @@ export class Router {
             throw err;
           }
         }
-        await this.markServed(profile, provider);
+        await this.markServed(profile, provider, attempt.preempted ?? lastSignal);
         this.deps.emitter.emit({
           type: 'request.finished',
           requestId,
@@ -205,19 +343,17 @@ export class Router {
           lastSignal = signal;
           await this.park(profile, signal);
           if (!emitted && !opts.strict) {
-            previous = profile.id;
-            continue; // silent failover: nothing reached the caller yet
+            // Nothing from this attempt reached the caller: silent failover. While a
+            // resume is pending, the next account continues it instead.
+            if (!interrupted) previous = profile.id;
+            continue;
+          }
+          if (emitted && resume && sentText.trim() && openTools.size === 0) {
+            interrupted = { profile, signal };
+            continue; // continue the answer on the next account of this provider
           }
           const e = emitted
-            ? new IronProxyError(
-                'STREAM_INTERRUPTED',
-                `Account "${profile.title}" hit a limit mid-stream. Resend to continue on the next account.`,
-                {
-                  retryable: true,
-                  details: { profileId: profile.id, signal },
-                  hint: 'Resend; the next account will take it.',
-                },
-              )
+            ? streamInterrupted(profile, signal)
             : new QuotaExceededError(profile.id, signal, provider);
           this.deps.emitter.emit({
             type: 'request.failed',
@@ -246,6 +382,18 @@ export class Router {
   /** Profile currently serving a provider, if any request has run. */
   activeProfileId(provider: ProviderId): string | undefined {
     return this.activeByProvider.get(provider);
+  }
+
+  /**
+   * Called after every usage snapshot a lane reports has been stored on the
+   * profile's state (the manager records utilisation samples from it). Listener
+   * errors are swallowed. Returns an unsubscribe function.
+   */
+  onUsage(listener: (profileId: string, usage: UsageSnapshot) => void): () => void {
+    this.usageListeners.add(listener);
+    return () => {
+      this.usageListeners.delete(listener);
+    };
   }
 
   /** Clear a park early (user pressed "try again"). */
@@ -316,9 +464,26 @@ export class Router {
     const now = this.clock.now();
     const candidates = await this.candidates(provider, opts);
     if (!candidates.length && !tried.length) throw new NoProfileError(provider);
-    for (const profile of candidates) {
+    const hot = await this.hotProfiles(provider, candidates, opts, now);
+    // Hot accounts go last for this request only; if all are hot, the order stands.
+    const ordered =
+      hot.size && hot.size < candidates.length
+        ? [...candidates.filter((p) => !hot.has(p.id)), ...candidates.filter((p) => hot.has(p.id))]
+        : candidates;
+    for (const profile of ordered) {
       if (tried.includes(profile.id)) continue;
       if (!(await this.availability(profile, opts, now)).usable) continue;
+      let preempted: QuotaSignal | undefined;
+      if (!hot.has(profile.id)) {
+        // Was a usable account ahead of this one deferred only because it is nearly full?
+        for (const ahead of candidates.slice(0, candidates.indexOf(profile))) {
+          const usage = hot.get(ahead.id);
+          if (!usage || tried.includes(ahead.id)) continue;
+          if (!(await this.availability(ahead, opts, now)).usable) continue;
+          preempted = preemptSignal(usage);
+          break;
+        }
+      }
       const controller = new AbortController();
       const timeout = setTimeout(
         () =>
@@ -337,7 +502,7 @@ export class Router {
         fetch: this.fetch,
         signal: controller.signal,
         now: () => this.clock.now(),
-        reportUsage: (usage: UsageSnapshot) => void this.recordUsage(profile.id, usage),
+        reportUsage: (usage: UsageSnapshot) => this.reportUsage(profile.id, usage),
       };
       return {
         profile,
@@ -346,9 +511,32 @@ export class Router {
           clearTimeout(timeout);
           opts.signal?.removeEventListener('abort', onOuterAbort);
         },
+        ...(preempted ? { preempted } : {}),
       };
     }
     return undefined;
+  }
+
+  /**
+   * Candidates whose last usage snapshot is nearly full (see isUsageHot), with
+   * that snapshot. Empty when the caller pinned a profile or the provider's
+   * policy turns pre-emption off.
+   */
+  private async hotProfiles(
+    provider: ProviderId,
+    candidates: Profile[],
+    opts: RunOptions,
+    now: number,
+  ): Promise<Map<string, UsageSnapshot>> {
+    const hot = new Map<string, UsageSnapshot>();
+    const threshold = this.policyFor(provider).preemptAtUtilisation;
+    if (opts.profileId || !(threshold < 1)) return hot;
+    for (const p of candidates) {
+      await this.usageWrites.get(p.id);
+      const usage = (await this.state(p.id)).usage;
+      if (usage && isUsageHot(usage, threshold, now)) hot.set(p.id, usage);
+    }
+    return hot;
   }
 
   private async exhausted(
@@ -409,14 +597,36 @@ export class Router {
     return (await this.deps.states.get(profileId)) ?? { profileId, status: 'unknown', served: 0 };
   }
 
+  /** Queue a usage write behind any earlier one for the same profile. */
+  private reportUsage(profileId: string, usage: UsageSnapshot): void {
+    const prev = this.usageWrites.get(profileId) ?? Promise.resolve();
+    const next = prev.then(() => this.recordUsage(profileId, usage)).catch(() => {});
+    this.usageWrites.set(profileId, next);
+    void next.then(() => {
+      if (this.usageWrites.get(profileId) === next) this.usageWrites.delete(profileId);
+    });
+  }
+
   private async recordUsage(profileId: string, usage: UsageSnapshot): Promise<void> {
     const st = await this.state(profileId);
     st.usage = usage;
     await this.deps.states.put(st);
     this.deps.emitter.emit({ type: 'profile.state', state: st });
+    for (const l of this.usageListeners) {
+      try {
+        l(profileId, usage);
+      } catch {
+        /* a listener never breaks a request */
+      }
+    }
   }
 
-  private async markServed(profile: Profile, provider: ProviderId): Promise<void> {
+  private async markServed(
+    profile: Profile,
+    provider: ProviderId,
+    reason?: QuotaSignal,
+  ): Promise<void> {
+    await this.usageWrites.get(profile.id);
     const prev = this.activeByProvider.get(provider);
     this.activeByProvider.set(provider, profile.id);
     const st = await this.state(profile.id);
@@ -440,6 +650,7 @@ export class Router {
         provider,
         ...(prev ? { fromProfileId: prev } : {}),
         toProfileId: profile.id,
+        ...(reason ? { reason } : {}),
       });
     }
   }
@@ -447,6 +658,7 @@ export class Router {
   async park(profile: Profile, signal: QuotaSignal): Promise<void> {
     const policy = this.policyFor(profile.provider);
     const now = this.clock.now();
+    await this.usageWrites.get(profile.id);
     const st = await this.state(profile.id);
     if (signal.kind === 'auth-expired') {
       st.status = 'unauthenticated';

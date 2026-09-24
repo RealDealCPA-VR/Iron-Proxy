@@ -24,10 +24,18 @@ createIronProxy({
 });
 ```
 
+Two more policy fields shape behaviour rather than timing, and can be overridden per provider the same way:
+
+| Field                  | Default | Effect                                                                                               |
+| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `preemptAtUtilisation` | `0.95`  | Try a nearly-full account last (see [Switch before the wall](#switch-before-the-wall)). `>= 1`: off. |
+| `resumeInterrupted`    | `false` | Continue a stream cut off mid-answer on the next account (see [Streaming](#streaming)).              |
+
 ## Selection algorithm
 
 ```
 candidates = enabled profiles of provider, sorted by order
+move 'hot' candidates to the end, unless every candidate is hot   # switch before the wall
 for p in candidates:
   if p is parked and parkedUntil <= now: unpark p            # auto-return
   if p is parked: skip
@@ -41,6 +49,17 @@ no candidate left → AllProfilesExhaustedError(earliest parkedUntil)
 
 Because parks are cleared lazily on the next selection, no timers run in the background and nothing polls the provider. The primary returns the moment it is eligible and a request arrives.
 
+## Switch before the wall
+
+Accounts report usage as they serve (rate-limit headers on the API lanes, usage hints from a CLI), and the router keeps the latest snapshot in `ProfileState.usage`. A candidate is **hot** when that snapshot says at least `preemptAtUtilisation` of the window is used (`utilisation >= 0.95` by default) **and** its `resetAt` is still in the future. For that request, hot candidates move to the end of the order, keeping their relative order. Nothing is parked and nothing is written: the next request looks again, and once the window resets the account is first again.
+
+- Usage whose `resetAt` has passed is stale and ignored. Usage without a `resetAt` never makes an account hot, and is treated as stale once it is more than ten minutes old.
+- If every candidate is hot, the normal order is used. Pre-emption reorders; it never refuses a request.
+- A pinned request (`profileId`) is never reordered: you chose that account.
+- It stays inside the provider, like all failover.
+- When a request is served by a later account because an earlier one was hot, and that changes the active account, `profile.switched` carries a reason with `source: 'usage'`, `kind: 'rate-limit'`, the window's `resetAt`, and a message like `Switched early: 96% of the window used, resets 3:40 PM`. No account name, email or secret is ever in it.
+- Set `preemptAtUtilisation: 1` (globally or for one provider) to turn it off.
+
 ## Pinning
 
 `{ profileId }` starts on that profile, then falls back to the rest in order. `{ profileId, strict: true }` never leaves it and surfaces `QuotaExceededError` instead of switching. Pinning a profile also lets an `unauthenticated` profile be tried (so a login can be verified by a real request).
@@ -48,7 +67,16 @@ Because parks are cleared lazily on the next selection, no timers run in the bac
 ## Streaming
 
 - Signal before the first byte: silent switch. The stream carries a `switched` event first (the proxy emits it as an SSE comment so wire-compatible clients ignore it).
-- Signal after content has flowed: the stream ends with an `error` event `STREAM_INTERRUPTED` (`retryable: true`), the account is parked, and the next attempt lands elsewhere. Splicing two accounts' partial answers would produce garbage, so it is not attempted.
+- Signal after content has flowed: by default the stream ends with an `error` event `STREAM_INTERRUPTED` (`retryable: true`), the account is parked, and the next attempt lands elsewhere.
+- On the Anthropic API lane, a mid-stream `error` event of type `rate_limit_error` or `overloaded_error` counts as a limit (a `rate-limit` or `overloaded` signal), not as a plain provider error.
+
+### Continuing a cut-off answer (opt-in)
+
+With `resumeInterrupted` on (policy, `RunOptions.resumeInterrupted`, the proxy header `x-iron-resume: 1`, or `iron-proxy chat --resume`), a limit that arrives **after text was streamed and while no tool call is open** does not end the stream. The account is parked as usual, and the next ready account **of the same provider** receives a continuation request: the original request, plus an assistant message holding exactly the text streamed so far, plus a user message `Continue exactly where you stopped. Do not repeat any text you already wrote.` The Anthropic API-key lane continues an assistant prefill natively, so it gets the partial text as the last (assistant) message with no extra user turn, trailing whitespace trimmed because Anthropic rejects a prefill that ends in whitespace.
+
+The caller sees the original `start`, the text so far, then a `switched` event with `resumed: true`, then only the continuation's text, usage and finish (its own `start` is swallowed). The proxy writes the switch as an SSE comment ending in `resumed`. If the continuation is cut off too, the next account continues it, and so on; when nobody is left, the stream ends with the same `STREAM_INTERRUPTED` error as before. A limit inside an open tool call, or with resume off, behaves exactly as before. Non-streaming `complete()` is unaffected: it already fails over before anything is returned.
+
+**Why it is off by default:** the join between the two accounts' text can occasionally show a seam, such as a repeated or missing word or a changed tone, because a different account (with no memory of the first one's reasoning) writes the rest. Turn it on where a finished answer matters more than a perfect join.
 
 ## What never happens
 
@@ -56,6 +84,10 @@ Because parks are cleared lazily on the next selection, no timers run in the bac
 - **No silent model downgrade.** The model you asked for is the model sent. If an account cannot serve it, that is a provider error, surfaced.
 - **No background probing.** Iron-Proxy does not spend your quota checking whether it is back.
 
+## Usage history does not steer failover
+
+The router's only new behaviour for the usage history is a hook: `Router.onUsage(listener)` is called after each usage snapshot a lane reports has been stored on the account's state. The manager uses it to record utilisation samples for `usageReport()`. The history and its time-left estimate are for people to read; they never park, reorder or pre-empt an account, and they never trigger a request to a provider.
+
 ## Events you can drive a UI from
 
-`profile.parked` (with `until`), `profile.unparked`, `profile.switched` (with the reason when caused by a signal), `provider.exhausted` (with `earliestResetAt`), `profile.state` (every state change), `request.started/finished/failed`, `login` (URL, code, output lines, completed/failed).
+`profile.parked` (with `until`), `profile.unparked`, `profile.switched` (with the reason when caused by a signal, `source: 'usage'` when it was an early switch), `provider.exhausted` (with `earliestResetAt`), `profile.state` (every state change), `request.started/finished/failed`, `login` (URL, code, output lines, completed/failed).

@@ -315,6 +315,56 @@ describe('an adopted home stays safe from patches and deletes', () => {
     expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('mine');
   });
 
+  it('deleteProfile keeps a home another profile shares or lives inside', async () => {
+    iron = createIronProxy({ dataDir: data, registry: fakeRegistry(), env: fakeEnv() });
+    const make = async (title: string, home: string) => {
+      await mkdir(home, { recursive: true });
+      await writeFile(join(home, 'keep.txt'), title);
+      return createSettled({ title, provider: 'anthropic', lane: 'cli', cli: { home } });
+    };
+    // Two profiles on one home: deleting either leaves it for the other.
+    const shared = join(data, 'cli-homes', 'anthropic', 'shared');
+    const a = await make('A', shared);
+    const b = await make('B', join(shared, '.')); // same directory, spelled differently
+    await iron.deleteProfile(a.id);
+    expect((await stat(shared)).isDirectory()).toBe(true);
+    // A home that holds another profile's home is kept too.
+    const outer = join(data, 'cli-homes', 'anthropic', 'outer');
+    const inner = join(outer, 'inner');
+    const o = await make('Outer', outer);
+    const i = await make('Inner', inner);
+    await iron.deleteProfile(o.id);
+    expect(await readFile(join(inner, 'keep.txt'), 'utf8')).toBe('Inner');
+    expect(await readFile(join(outer, 'keep.txt'), 'utf8')).toBe('Outer');
+    // The control: once nobody else uses them, the homes Iron-Proxy owns do go.
+    await iron.deleteProfile(i.id);
+    await expect(stat(inner)).rejects.toThrow();
+    await iron.deleteProfile(b.id);
+    await expect(stat(shared)).rejects.toThrow();
+  });
+
+  it('updateProfile refuses a cli.home another profile already uses, with a hint', async () => {
+    iron = createIronProxy({ dataDir: data, registry: fakeRegistry(), env: fakeEnv() });
+    const a = await createSettled({ title: 'A', provider: 'anthropic', lane: 'cli' });
+    const b = await createSettled({ title: 'B', provider: 'anthropic', lane: 'cli' });
+    const err = await iron
+      .updateProfile(b.id, { cli: { home: join(a.cli!.home, '.') } })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(IronProxyError);
+    expect(err).toMatchObject({
+      code: 'INVALID_REQUEST',
+      message: expect.stringContaining('Profile "A" already uses'),
+      hint: expect.stringContaining(a.id),
+    });
+    expect((await iron.getProfile(b.id)).cli?.home).toBe(b.cli!.home);
+    // Its own home, or a free one, is still fine.
+    expect((await iron.updateProfile(b.id, { cli: { home: b.cli!.home } })).cli?.home).toBe(
+      b.cli!.home,
+    );
+    const free = join(dir, 'free-home');
+    expect((await iron.updateProfile(b.id, { cli: { home: free } })).cli?.home).toBe(free);
+  });
+
   it('isStrictlyInside rejects the folder itself, prefix siblings, parents and escapes', () => {
     const base = join(dir, 'cli-homes');
     expect(isStrictlyInside(base, join(base, 'anthropic', 'p1'))).toBe(true);
@@ -361,10 +411,16 @@ describe('discoverLogins runs the status probes in parallel', () => {
       }
       override async checkAuth(profile: Profile) {
         if (++started === 3) release();
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('probes ran one after another')), 3000),
-        );
-        await Promise.race([allStarted, timeout]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('probes ran one after another')), 3000);
+        });
+        try {
+          await Promise.race([allStarted, timeout]);
+        } finally {
+          // The race settled: clear the timer so it never fires an unhandled rejection later.
+          clearTimeout(timer);
+        }
         await new Promise((r) => setTimeout(r, this.delayMs));
         const status = await super.checkAuth(profile);
         finished.push(profile.provider);

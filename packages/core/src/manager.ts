@@ -18,6 +18,7 @@ import type {
   StreamEvent,
   UnifiedRequest,
   UnifiedResponse,
+  UsageReport,
 } from './types.js';
 import { PROVIDER_IDS } from './types.js';
 import {
@@ -36,6 +37,8 @@ import { run, which } from './adapters/cli/runner.js';
 import { Router } from './router/router.js';
 import { FileProfileStore, type ProfileStore } from './store/profile-store.js';
 import { FileStateStore, type StateStore } from './store/state-store.js';
+import { FileUsageStore, type UsageStore } from './store/usage-store.js';
+import { buildUsageReport } from './usage/report.js';
 import { FileVault, type KeyProtector, type Vault } from './vault/vault.js';
 import { isoNow, newId, systemClock, type Clock } from './util.js';
 
@@ -44,6 +47,11 @@ export interface IronProxyOptions {
   dataDir?: string;
   profiles?: ProfileStore;
   states?: StateStore;
+  /**
+   * Usage history (finished requests, parks, utilisation samples) behind
+   * `usageReport()`. Default `<dataDir>/usage.json`, bounded to 14 days.
+   */
+  usage?: UsageStore;
   vault?: Vault;
   /** Used only when `vault` is not given, to protect the file vault's key. */
   keyProtector?: KeyProtector;
@@ -118,6 +126,7 @@ export class IronProxy {
   readonly dataDir: string;
   readonly profiles: ProfileStore;
   readonly states: StateStore;
+  readonly usage: UsageStore;
   readonly vault: Vault;
   readonly registry: AdapterRegistry;
   readonly events: IronEmitter;
@@ -125,6 +134,9 @@ export class IronProxy {
   private readonly clock: Clock;
   private readonly env: NodeJS.ProcessEnv;
   private readonly logins = new Map<string, LoginSession>();
+  /** Usage-history writes in flight, awaited by close() before the flush. */
+  private readonly usageWrites = new Set<Promise<void>>();
+  private readonly usageOff: Array<() => void> = [];
 
   constructor(opts: IronProxyOptions = {}) {
     this.dataDir = opts.dataDir ?? defaultDataDir();
@@ -145,6 +157,57 @@ export class IronProxy {
       ...(opts.policy ? { policy: opts.policy } : {}),
       ...(opts.fetch ? { fetch: opts.fetch } : {}),
     });
+    this.usage = opts.usage ?? new FileUsageStore(this.dataDir, { clock: this.clock });
+    this.recordUsageHistory();
+  }
+
+  /**
+   * Feed the usage history from the manager's own events and the router's usage
+   * hook. Only counts, kinds and timestamps are kept: no prompt text, output,
+   * secrets or emails.
+   */
+  private recordUsageHistory(): void {
+    const track = (write: () => Promise<void>) => {
+      const p = write().catch(() => {});
+      this.usageWrites.add(p);
+      void p.then(() => this.usageWrites.delete(p));
+    };
+    const at = () => isoNow(this.clock);
+    this.usageOff.push(
+      this.events.on('request.finished', (e) =>
+        track(() =>
+          this.usage.addRequest(e.profileId, {
+            at: at(),
+            durationMs: e.durationMs,
+            ...(e.usage?.inputTokens !== undefined ? { inputTokens: e.usage.inputTokens } : {}),
+            ...(e.usage?.outputTokens !== undefined ? { outputTokens: e.usage.outputTokens } : {}),
+            ...(e.usage?.cacheReadTokens !== undefined
+              ? { cacheReadTokens: e.usage.cacheReadTokens }
+              : {}),
+          }),
+        ),
+      ),
+      this.events.on('profile.parked', (e) =>
+        track(() =>
+          this.usage.addPark(e.profileId, {
+            at: at(),
+            kind: e.reason.kind,
+            ...(e.until ? { until: e.until } : {}),
+          }),
+        ),
+      ),
+      this.router.onUsage((profileId, usage) => {
+        const u = usage.utilisation;
+        if (typeof u !== 'number' || !Number.isFinite(u)) return;
+        track(() =>
+          this.usage.addSample(profileId, {
+            at: at(),
+            utilisation: u,
+            ...(usage.resetAt ? { resetAt: usage.resetAt } : {}),
+          }),
+        );
+      }),
+    );
   }
 
   /* ---------------------------------------------------------------- */
@@ -264,7 +327,22 @@ export class IronProxy {
       // `adopted` is set only by adoptLogin and never by a patch: clearing it would let
       // deleteProfile remove a login the user made. An adopted profile keeps its home.
       const { adopted: _adopted, home, ...rest } = patch.cli;
-      p.cli = { ...p.cli, ...rest, ...(home !== undefined && !p.cli.adopted ? { home } : {}) };
+      const newHome = home !== undefined && !p.cli.adopted ? home : undefined;
+      if (newHome !== undefined) {
+        const owner = (await this.profiles.list()).find(
+          (o) => o.id !== id && !!o.cli?.home && samePath(o.cli.home, newHome),
+        );
+        if (owner)
+          throw new IronProxyError(
+            'INVALID_REQUEST',
+            `Profile "${owner.title}" already uses "${resolve(newHome)}".`,
+            {
+              details: { home: resolve(newHome), profileId: owner.id },
+              hint: `Pick another directory; two profiles on one home would fail over onto the same account (${owner.id} uses it).`,
+            },
+          );
+      }
+      p.cli = { ...p.cli, ...rest, ...(newHome !== undefined ? { home: newHome } : {}) };
     }
     if (patch.apiKey && p.apiKey) p.apiKey = { ...p.apiKey, ...patch.apiKey };
     if (patch.oauth && p.oauth) p.oauth = { ...p.oauth, ...patch.oauth };
@@ -284,23 +362,32 @@ export class IronProxy {
   /**
    * Delete the profile, its secrets and (for CLI profiles) its isolated home
    * directory. Only directories Iron-Proxy created under `<dataDir>/cli-homes`
-   * are removed; an adopted home is never touched.
+   * are removed; an adopted home is never touched, and neither is a home that
+   * another profile also uses or that holds another profile's home.
    */
   async deleteProfile(id: string, opts: { keepFiles?: boolean } = {}): Promise<void> {
     const p = await this.getProfile(id);
     this.logins.get(id)?.cancel();
     if (p.apiKey?.secretRef) await this.vault.delete(p.apiKey.secretRef).catch(() => {});
     if (p.oauth?.secretRef) await this.vault.delete(p.oauth.secretRef).catch(() => {});
+    const home = p.cli?.home;
     if (
-      p.cli?.home &&
-      !p.cli.adopted &&
+      home &&
+      !p.cli?.adopted &&
       !opts.keepFiles &&
-      isStrictlyInside(join(this.dataDir, 'cli-homes'), p.cli.home)
+      isStrictlyInside(join(this.dataDir, 'cli-homes'), home)
     ) {
-      await rm(p.cli.home, { recursive: true, force: true }).catch(() => {});
+      const shared = (await this.profiles.list()).some(
+        (o) =>
+          o.id !== id &&
+          !!o.cli?.home &&
+          (samePath(o.cli.home, home) || isStrictlyInside(home, o.cli.home)),
+      );
+      if (!shared) await rm(home, { recursive: true, force: true }).catch(() => {});
     }
     await this.profiles.delete(id);
     await this.states.delete(id);
+    await this.usage.delete(id).catch(() => {});
     this.events.emit({ type: 'profile.deleted', profileId: id });
   }
 
@@ -686,6 +773,23 @@ export class IronProxy {
     return this.router.unpark(id);
   }
 
+  /**
+   * Requests and tokens per profile over the last 1h / 5h / 24h / 7d, parks this
+   * week, the latest utilisation of the current window and, when at least three
+   * samples of that window show a rising trend, an estimate of the minutes left
+   * at this pace. Reads local history only; never calls a provider.
+   */
+  async usageReport(opts: { profileId?: string } = {}): Promise<UsageReport[]> {
+    const targets = opts.profileId
+      ? [await this.getProfile(opts.profileId)]
+      : await this.listProfiles();
+    await Promise.all([...this.usageWrites]);
+    const now = this.clock.now();
+    return Promise.all(
+      targets.map(async (p) => buildUsageReport(p.id, await this.usage.history(p.id), now)),
+    );
+  }
+
   activeProfileId(provider: ProviderId): string | undefined {
     return this.router.activeProfileId(provider);
   }
@@ -736,6 +840,10 @@ export class IronProxy {
   async close(): Promise<void> {
     for (const s of this.logins.values()) s.cancel();
     this.logins.clear();
+    for (const off of this.usageOff.splice(0)) off();
+    await Promise.all([...this.usageWrites]);
+    const usage = this.usage as UsageStore & { flush?: () => Promise<void> };
+    if (typeof usage.flush === 'function') await usage.flush().catch(() => {});
     if (this.states instanceof FileStateStore) await this.states.flush();
     this.events.removeAll();
   }

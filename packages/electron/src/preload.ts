@@ -52,6 +52,7 @@ const METHODS = [
   'doctor',
   'discoverLogins',
   'adoptLogin',
+  'usageReport',
 ] as const;
 
 /** Build the IronClient implementation the preload exposes. Exported for tests. */

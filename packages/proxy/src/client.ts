@@ -16,6 +16,7 @@ import type {
   ProfileState,
   ProviderId,
   ProviderInfo,
+  UsageReport,
 } from '@iron-proxy/core';
 
 export interface HttpIronClientOptions {
@@ -173,6 +174,12 @@ export class HttpIronClient implements IronClient {
   }
   adoptLogin(input: AdoptLoginInput): Promise<Profile> {
     return this.call('POST', '/iron/adopt', input);
+  }
+  usageReport(profileId?: string): Promise<UsageReport[]> {
+    return this.call(
+      'GET',
+      `/iron/usage${profileId ? `?profileId=${encodeURIComponent(profileId)}` : ''}`,
+    );
   }
 
   /** Subscribe to `/iron/events`. Reconnects with backoff until unsubscribed. */

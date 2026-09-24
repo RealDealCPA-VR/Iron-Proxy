@@ -27,10 +27,14 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] Manager facade: profile CRUD, reorder/activate, API-key set, login/logout/refresh, unpark, models, doctor, close.
 - [x] `IronClient` contract + `LocalIronClient`.
 - [x] 99 tests incl. a fake vendor CLI exercising all four flavours through the real spawn path.
+- [x] Switch before the wall: accounts whose fresh usage is at or above `preemptAtUtilisation` (default 95%) go last for the request, nothing parked; `profile.switched` reason with `source: 'usage'`.
+- [x] Opt-in resume of a stream cut off mid-answer (`resumeInterrupted`, `x-iron-resume: 1`, `chat --resume`): the next account continues from the partial text; Anthropic API gets a trimmed assistant prefill.
 - [ ] Multi-turn for the CLI lane via Claude's `--input-format stream-json` and Codex `exec resume`, instead of transcript flattening.
 - [ ] Optional cheap liveness probe when a park expires (opt-in; default stays "no background probing").
 - [ ] Per-profile concurrency limit and request queue.
-- [ ] Usage accounting per profile per window (tokens, requests) surfaced in `ProfileState.usage` even for providers without headers.
+- [x] Usage history per profile (`UsageStore`, `<dataDir>/usage.json`, 14 days / 5000 records, counts only): requests and tokens for 1h / 5h / 24h / 7d, parks this week, and a time-left estimate from the utilisation trend (`IronProxy.usageReport()`).
+- [ ] Usage accounting per profile per window surfaced in `ProfileState.usage` even for providers without headers (the history counts requests and tokens; it does not know the plan's limits).
+- [ ] Time-left estimate from token burn for providers that report no utilisation.
 - [x] Adopt existing logins: `discoverLogins()` finds a signed-in `~/.claude`, `~/.codex`, `~/.grok` (or their home variables) via the CLI's own status command, and `adoptLogin()` uses that directory in place (`cli.adopted`), never copying or deleting it.
 - [ ] Adopt existing Gemini CLI logins once its default home layout is verified.
 - [x] Actionable `hint` on every error (`IronProxyError.hint`, `SerializedError.hint`), sanitised of secrets and emails, with the official install command for a missing vendor CLI.
@@ -41,6 +45,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] Loopback HTTP server, bearer-token control API, OpenAI + Anthropic compatible model routes, SSE streaming, `/v1/models`, `/iron/events` SSE, error mapping incl. `retry-after`.
 - [x] `HttpIronClient` implementing `IronClient` with SSE reconnect.
 - [x] `GET /iron/discover`, `POST /iron/adopt`; error bodies carry `iron.hint`, and `HttpIronClientError.hint`.
+- [x] `GET /iron/usage[?profileId=]` and `HttpIronClient.usageReport()`.
 - [ ] Anthropic `count_tokens` and OpenAI `responses` endpoints.
 - [ ] Optional Unix socket / named pipe listener.
 - [ ] Request/response logging hook (redacted) for debugging.
@@ -49,6 +54,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 
 - [x] `createElectronIronProxy` (userData dir, `safeStorage` key protector), `installIronProxy` IPC dispatcher with method whitelist, preload `exposeIronProxy`, renderer `getIronClient`, `openLoginTerminal` for win32/darwin/linux.
 - [x] The bridge carries `discoverLogins` / `adoptLogin`, and `IronBridgeError.hint`.
+- [x] The bridge carries `usageReport`.
 - [ ] Auto-start and supervise the proxy as a child process from Electron (for hosts that want SDK compatibility inside the app).
 - [ ] Deep-link return from browser login for CLIs that support a custom callback.
 
@@ -56,6 +62,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 
 - [x] `useIronProxy`, `useCountdown`, `<AccountSwitcher />` with add / title / reorder / toggle / login (URL + code) / usage bars / parked timers / exhausted banner, light + dark, keyboard accessible.
 - [x] "Found on this computer" in Add account with one-click "Use this account"; "Existing login" badge; confirm before logging out an adopted login; hints under error messages.
+- [x] `useUsageReport(client, { refreshMs })` and `<UsagePanel client />`: per-account request bars for 5h / 24h / 7d, tokens this week, parks this week, "About 40 min left at this pace"; a **Usage** toggle in the switcher header.
 - [ ] Headless primitives export (`useAccountRow`, `useAddAccountFlow`) for fully custom UIs.
 - [ ] Drag-and-drop reorder (pointer + keyboard).
 - [ ] Storybook or a static gallery page for visual review.
@@ -66,6 +73,7 @@ The build plan Iron-Proxy was scaffolded from, kept current. Checked items exist
 - [x] `profiles discover [--json]`, `profiles adopt <provider> [--home DIR] [--title T]`; a `hint: …` line after every error.
 - [x] `setup [--yes]`: guided first run (doctor, adopt found logins, add accounts, summary).
 - [x] `run <provider> [--profile id] [-- args]` and `env <provider> [--shell bash|powershell|cmd]`: use the ready account from your own terminal (`IronProxy.pickProfile`).
+- [x] `usage [--json] [--profile id]`: requests and tokens for 5h / 24h / 7d, parks this week, `about N min left at this pace`.
 - [ ] Shell completions.
 - [ ] `iron-proxy export/import` for moving profiles (never secrets) between machines.
 

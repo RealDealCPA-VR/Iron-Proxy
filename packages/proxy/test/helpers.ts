@@ -13,9 +13,14 @@ import { createProxyServer, type ProxyServer } from '../src/index.js';
 
 export interface FakeUpstream {
   fetch: typeof fetch;
-  calls: Array<{ url: string; key: string | null; stream: boolean }>;
+  calls: Array<{ url: string; key: string | null; stream: boolean; body: Record<string, unknown> }>;
   /** Keys that should 429 on their next call (consumed). */
   exhaustNext: Set<string>;
+  /**
+   * Keys whose next Anthropic stream sends "served " and then a mid-stream
+   * `rate_limit_error` event (consumed).
+   */
+  cutMidStream: Set<string>;
   /** Keys that always 429 with the given reset. */
   alwaysExhausted: Map<string, string>;
 }
@@ -26,6 +31,7 @@ export function fakeUpstream(): FakeUpstream {
     fetch: undefined as unknown as typeof fetch,
     calls: [],
     exhaustNext: new Set(),
+    cutMidStream: new Set(),
     alwaysExhausted: new Map(),
   };
   state.fetch = async (input, init) => {
@@ -38,7 +44,7 @@ export function fakeUpstream(): FakeUpstream {
       messages?: Array<{ content: unknown }>;
     };
     const stream = !!body.stream;
-    state.calls.push({ url, key, stream });
+    state.calls.push({ url, key, stream, body: body as Record<string, unknown> });
     const isAnthropic = url.includes('/messages');
 
     const reset =
@@ -73,6 +79,37 @@ export function fakeUpstream(): FakeUpstream {
           stop_reason: 'end_turn',
           usage: { input_tokens: 3, output_tokens: 2 },
         });
+      }
+      if (key && state.cutMidStream.has(key)) {
+        state.cutMidStream.delete(key);
+        return sse([
+          ev('message_start', {
+            type: 'message_start',
+            message: {
+              id: 'msg_cut',
+              type: 'message',
+              role: 'assistant',
+              model: 'claude-x',
+              content: [],
+              stop_reason: null,
+              usage: { input_tokens: 3, output_tokens: 0 },
+            },
+          }),
+          ev('content_block_start', {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text', text: '' },
+          }),
+          ev('content_block_delta', {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'served ' },
+          }),
+          ev('error', {
+            type: 'error',
+            error: { type: 'rate_limit_error', message: 'limited mid-stream' },
+          }),
+        ]);
       }
       const frames = [
         ev('message_start', {

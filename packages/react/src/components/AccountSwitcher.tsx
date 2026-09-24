@@ -6,9 +6,10 @@ import { defaultLabels, interpolate, type Labels } from '../labels.js';
 import { formatClock, groupByProvider, PROVIDER_SHORT } from '../util.js';
 import { AccountRow } from './AccountRow.jsx';
 import { AddAccount } from './AddAccount.jsx';
+import { UsagePanel } from './UsagePanel.jsx';
 import { ErrorBanner } from './bits.jsx';
 import { SwitcherContext, type SwitcherContextValue } from './context.js';
-import { IconPlus, IconRefresh, IconWarn } from './icons.jsx';
+import { IconChart, IconPlus, IconRefresh, IconWarn } from './icons.jsx';
 
 export interface AccountSwitcherProps {
   /** Any IronClient: window.ironProxy from the Electron preload, HttpIronClient, or LocalIronClient. */
@@ -57,6 +58,7 @@ export function AccountSwitcher({
   }, []);
   const view = useIronProxy(client, { onEvent });
   const [adding, setAdding] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
 
   const providerName = useCallback(
     (id: ProviderId) =>
@@ -95,6 +97,16 @@ export function AccountSwitcher({
         <header className="iron-header">
           <h2>{labels.title}</h2>
           <div className="iron-header-actions">
+            <button
+              type="button"
+              className={`iron-btn iron-btn--sm${showUsage ? ' iron-btn--pressed' : ''}`}
+              aria-pressed={showUsage}
+              onClick={() => setShowUsage((v) => !v)}
+              data-testid="usage-toggle"
+            >
+              <IconChart />
+              <span>{labels.usageShow}</span>
+            </button>
             <button
               type="button"
               className="iron-btn iron-btn--icon iron-btn--ghost"
@@ -153,6 +165,8 @@ export function AccountSwitcher({
             </div>
           ) : null,
         )}
+
+        {showUsage ? <UsagePanel client={client} {...(providers ? { providers } : {})} /> : null}
 
         {adding ? <AddAccount onClose={() => setAdding(false)} providers={providers} /> : null}
 

@@ -74,6 +74,20 @@ export interface Labels {
   dismiss: string;
   errorPrefix: string;
   apiKeySaved: string;
+  // usage panel
+  usageShow: string;
+  usageTitle: string;
+  usageLoading: string;
+  usageEmpty: string;
+  usageWindow5h: string;
+  usageWindow24h: string;
+  usageWindow7d: string;
+  usageRequests: string;
+  usageTokens: string;
+  usageParks: string;
+  usageNoParks: string;
+  usageEstimate: string;
+  usageEstimateRough: string;
 }
 
 export const defaultLabels: Labels = {
@@ -146,6 +160,19 @@ export const defaultLabels: Labels = {
   dismiss: 'Dismiss',
   errorPrefix: 'Something went wrong',
   apiKeySaved: 'API key saved.',
+  usageShow: 'Usage',
+  usageTitle: 'Usage',
+  usageLoading: 'Loading usage…',
+  usageEmpty: 'No usage recorded yet.',
+  usageWindow5h: '5h',
+  usageWindow24h: '24h',
+  usageWindow7d: '7d',
+  usageRequests: '{count} requests in the last {window}',
+  usageTokens: 'This week: {input} tokens in · {output} out',
+  usageParks: 'Parked {count}× this week',
+  usageNoParks: 'Not parked this week',
+  usageEstimate: 'About {minutes} min left at this pace',
+  usageEstimateRough: 'rough estimate',
 };
 
 export function interpolate(template: string, vars: Record<string, string>): string {

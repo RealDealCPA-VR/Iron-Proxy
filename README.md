@@ -24,6 +24,8 @@ Iron-Proxy makes that a non-event. Give your app a list of titled accounts per p
 - **Bring your own subscription, honestly.** The subscription lane drives the vendor's _official_ CLI (`claude`, `codex`, `grok`, `gemini`), each account in its own isolated home directory. Sign-in is the vendor's sign-in. No scraped tokens, no home-brewed OAuth against a consumer plan, nothing for a vendor to object to.
 - **Any app, any language.** Use it as a TypeScript library, or run the local proxy and point the OpenAI SDK or the Anthropic SDK at `http://127.0.0.1:8791`. Python, Rust, Go, a shell script: if it can speak OpenAI or Anthropic wire format, it gets account switching for free.
 - **A finished switcher UI, not a TODO.** `<AccountSwitcher />` ships styled, accessible, light and dark: add, title, reorder, toggle, log in with the link and code right in the panel, watch usage bars and parked countdowns. Ten lines in an Electron app.
+- **Switch before the wall, finish the sentence.** An account whose window is 95% used is tried last until it resets, so requests move on before they fail. Opt in to `resumeInterrupted` (`x-iron-resume: 1`, `chat --resume`) and an answer cut off by a limit mid-stream is continued by your next account of that provider.
+- **Know how long you have.** Iron-Proxy keeps a small local history (counts and times only, never prompts or output): requests and tokens per account for the last 5 hours, 24 hours and 7 days, parks this week, and, once a few usage readings show the trend, "about 40 min left at this pace". `iron-proxy usage`, `IronProxy.usageReport()`, `GET /iron/usage`, or the **Usage** button in the switcher.
 - **Your data stays with the provider you chose.** Failover is same-provider only. A Claude request never lands at OpenAI because a limit was hit. When every account of a provider is parked, your app is told, with the earliest reset time, and _you_ decide.
 - **Secrets done properly.** API keys live in an AES-256-GCM vault whose master key is wrapped by the OS keychain in Electron (DPAPI, Keychain, libsecret). No passphrase prompts. Click and continue.
 
@@ -77,6 +79,8 @@ npx iron-proxy env anthropic | Out-String | Invoke-Expression  # PowerShell (--s
 ```
 
 `run` picks the account a request would use first (enabled, not parked, signed in, lowest order), prints `Using "<title>" (<provider>)` (with `--profile id` it uses that account even when it is parked or signed out, and prints a `Note:` line saying so), and starts the vendor CLI with its home variable set and every `*_API_KEY` removed, so the subscription pays, not a stray key. On Windows `env` prints PowerShell lines unless you pass `--shell bash` or `--shell cmd`. `env` prints only the home variable (plus the profile's own `cli.env` entries) and lines that clear the API-key variables; never `PATH`, never a secret.
+
+`npx iron-proxy usage` shows each account's requests and tokens for 5h / 24h / 7d, its parks this week and, when there is enough of a trend, `about N min left at this pace` (`(rough)` while it rests on few readings). It reads the local history only and never calls a provider.
 
 An interactive session **cannot switch accounts mid-session**: it stays on the account it started with. When that account hits its limit, quit and `iron-proxy run` again; the next ready account takes over.
 

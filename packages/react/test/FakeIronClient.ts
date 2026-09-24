@@ -11,6 +11,7 @@ import type {
   ProfileState,
   ProviderId,
   ProviderInfo,
+  UsageReport,
 } from '@iron-proxy/core';
 
 /** In-memory IronClient that emits the same events the real manager does. */
@@ -25,6 +26,8 @@ export class FakeIronClient implements IronClient {
   pendingLogins = new Map<string, { resolve(): void; reject(e: Error): void }>();
   /** What discoverLogins reports (existing CLI logins on "this computer"). */
   discovered: DiscoveredLogin[] = [];
+  /** What usageReport returns (all profiles; filtered by id when asked). */
+  usage: UsageReport[] = [];
 
   emit(e: IronEvent): void {
     for (const l of this.listeners) l(e);
@@ -241,6 +244,12 @@ export class FakeIronClient implements IronClient {
     this.emit({ type: 'profile.created', profile: p });
     this.emit({ type: 'profile.state', state: this.stateMap.get(p.id)! });
     return p;
+  }
+  async usageReport(profileId?: string): Promise<UsageReport[]> {
+    this.calls.push(`usageReport:${profileId ?? '*'}`);
+    return structuredClone(
+      profileId ? this.usage.filter((r) => r.profileId === profileId) : this.usage,
+    );
   }
   onEvent(listener: (e: IronEvent) => void): () => void {
     this.listeners.add(listener);

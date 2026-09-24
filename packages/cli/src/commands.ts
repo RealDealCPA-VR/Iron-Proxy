@@ -20,7 +20,10 @@ import {
   type Profile,
   type ProfileState,
   type ProviderId,
+  type RunOptions,
   type UnifiedRequest,
+  type UsageReport,
+  type UsageWindowTotals,
 } from '@iron-proxy/core';
 import { createProxyServer } from '@iron-proxy/proxy';
 import { buildLaunch, launchInteractive, type SpawnFn } from './launch.js';
@@ -62,9 +65,10 @@ Usage:
   iron-proxy login <id> [--terminal]
   iron-proxy logout <id>
   iron-proxy status [--json]
+  iron-proxy usage [--json] [--profile id]
   iron-proxy doctor [--json]
   iron-proxy models <id>
-  iron-proxy chat <provider-or-model> [-m model] [--profile id] "prompt"
+  iron-proxy chat <provider-or-model> [-m model] [--profile id] [--resume] "prompt"
   iron-proxy run <provider> [--profile id] [-- extra args for the vendor CLI]
   iron-proxy env <provider> [--profile id] [--shell bash|powershell|cmd]
 
@@ -98,6 +102,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         home: { type: 'string' },
         shell: { type: 'string' },
         yes: { type: 'boolean', short: 'y' },
+        resume: { type: 'boolean' },
       },
     });
   } catch (err) {
@@ -160,6 +165,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       }
       case 'status':
         return await status(iron, io, json);
+      case 'usage':
+        return await usage(iron, io, json, values.profile as string | undefined);
       case 'doctor': {
         const probes = await iron.doctor();
         if (json) out(JSON.stringify(probes, null, 2));
@@ -419,12 +426,19 @@ async function profiles(
         home,
         ...(typeof v.title === 'string' ? { title: v.title } : {}),
       });
-      const st = (await iron.allStates())[p.id]?.status ?? 'unknown';
+      // Check this one profile's sign-in (its own CLI's status command, nothing else).
+      const checked = await iron.refreshStatus(p.id).catch(() => []);
+      const st =
+        checked.find((x) => x.profileId === p.id)?.status ??
+        (await iron.allStates())[p.id]?.status ??
+        'unknown';
       out(
         json
           ? JSON.stringify(p, null, 2)
-          : `Adopted ${p.cli?.home} as ${p.id} ("${p.title}", ${st}). Iron-Proxy will never delete that directory.${st === 'unauthenticated' ? ` Next: iron-proxy login ${p.id}` : ''}`,
+          : `Adopted ${p.cli?.home} as ${p.id} ("${p.title}", ${st}). Iron-Proxy will never delete that directory.`,
       );
+      if (st === 'unauthenticated')
+        io.stderr.write(`Note: "${p.title}" is not signed in yet: iron-proxy login ${p.id}\n`);
       return 0;
     }
     case 'rename': {
@@ -529,7 +543,7 @@ async function chat(
     prompt = (await read()).trim();
   }
   if (!prompt) throw new IronProxyError('INVALID_REQUEST', 'No prompt given.');
-  const opts: { provider?: ProviderId; profileId?: string } = {};
+  const opts: RunOptions = {};
   const req: UnifiedRequest = {
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
   };
@@ -537,17 +551,21 @@ async function chat(
   else req.model = target;
   if (typeof v.model === 'string') req.model = v.model;
   if (typeof v.profile === 'string') opts.profileId = v.profile;
+  // --resume: a limit hit mid-answer continues on the next account instead of stopping.
+  if (v.resume) opts.resumeInterrupted = true;
 
   let served: string | undefined;
   let failed = false;
   for await (const ev of iron.stream(req, opts)) {
     if (ev.type === 'start') served = ev.profileId;
     else if (ev.type === 'text') io.stdout.write(ev.delta);
-    else if (ev.type === 'switched')
+    else if (ev.type === 'switched') {
+      // A resumed answer finishes on the new account (its own `start` is not repeated).
+      if (ev.resumed) served = ev.toProfileId;
       io.stderr.write(
-        `[iron] switched ${ev.fromProfileId} -> ${ev.toProfileId} (${ev.reason.kind})\n`,
+        `[iron] switched ${ev.fromProfileId} -> ${ev.toProfileId} (${ev.reason.kind}${ev.resumed ? ', resumed' : ''})\n`,
       );
-    else if (ev.type === 'error') {
+    } else if (ev.type === 'error') {
       failed = true;
       io.stderr.write(`\n[iron] ${ev.error.code}: ${ev.error.message}\n`);
       if (ev.error.hint) io.stderr.write(`hint: ${ev.error.hint}\n`);
@@ -925,6 +943,57 @@ async function addAccount(
     return;
   }
   await headlessLogin(iron, p.id, out, errLine);
+}
+
+/** Compact count: 950, 1.2k, 3.4M. */
+export function compactNumber(n: number): string {
+  if (n < 1_000) return String(n);
+  if (n < 1_000_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0).replace(/\.0$/, '')}k`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+}
+
+function windowCell(w: UsageWindowTotals): string {
+  const tokens = w.inputTokens + w.outputTokens;
+  return `${w.requests} req, ${compactNumber(tokens)} tok`;
+}
+
+/** 'about 40 min left at this pace', with '(rough)' for a low-confidence estimate. */
+export function estimateLine(r: UsageReport): string {
+  if (!r.estimate) return '';
+  return `about ${r.estimate.minutesLeft} min left at this pace${r.estimate.confidence === 'low' ? ' (rough)' : ''}`;
+}
+
+async function usage(
+  iron: IronProxy,
+  io: CliIo,
+  json: boolean,
+  profileId: string | undefined,
+): Promise<number> {
+  const reports = await iron.usageReport(profileId ? { profileId } : {});
+  const out = (s: string) => io.stdout.write(s.endsWith('\n') ? s : `${s}\n`);
+  if (json) {
+    out(JSON.stringify(reports, null, 2));
+    return 0;
+  }
+  if (!reports.length) {
+    out('No accounts yet. Add one with iron-proxy setup.');
+    return 0;
+  }
+  const profiles = new Map((await iron.listProfiles()).map((p) => [p.id, p]));
+  const rows = reports.map((r) => {
+    const p = profiles.get(r.profileId);
+    return [
+      p?.title ?? r.profileId,
+      p?.provider ?? '',
+      windowCell(r.windows['5h']),
+      windowCell(r.windows['24h']),
+      windowCell(r.windows['7d']),
+      String(r.parks7d),
+      estimateLine(r),
+    ];
+  });
+  out(table(['title', 'provider', '5h', '24h', '7d', 'parks this week', 'pace'], rows));
+  return 0;
 }
 
 function fmtTime(iso: string): string {

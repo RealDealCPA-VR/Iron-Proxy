@@ -2,6 +2,7 @@ export { AccountSwitcher, type AccountSwitcherProps } from './components/Account
 export { AccountRow, type AccountRowProps } from './components/AccountRow.jsx';
 export { AddAccount, type AddAccountProps } from './components/AddAccount.jsx';
 export { LoginPanel, type LoginPanelProps } from './components/LoginPanel.jsx';
+export { UsagePanel, type UsagePanelProps } from './components/UsagePanel.jsx';
 export {
   StatusPill,
   UsageBar,
@@ -21,11 +22,17 @@ export {
   type UseIronProxyOptions,
 } from './hooks/useIronProxy.js';
 export { useCountdown, type Countdown } from './hooks/useCountdown.js';
+export {
+  useUsageReport,
+  type UsageReportView,
+  type UseUsageReportOptions,
+} from './hooks/useUsageReport.js';
 export { defaultLabels, interpolate, type Labels } from './labels.js';
 export {
   groupByProvider,
   formatRemaining,
   formatClock,
+  formatCount,
   formatLoginCommand,
   suggestTitle,
   toClientError,

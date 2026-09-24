@@ -128,7 +128,7 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     return {
       'access-control-allow-origin': origin,
       'access-control-allow-headers':
-        'authorization, content-type, x-iron-token, x-iron-provider, x-iron-profile, anthropic-version, x-api-key',
+        'authorization, content-type, x-iron-token, x-iron-provider, x-iron-profile, x-iron-resume, anthropic-version, x-api-key',
       'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'access-control-expose-headers': 'x-iron-profile, retry-after',
       ...(opts.cors === true ? { vary: 'origin' } : {}),
@@ -257,6 +257,13 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     }
     const profile = req.headers['x-iron-profile'];
     if (typeof profile === 'string' && profile) out.profileId = profile;
+    const resume = req.headers['x-iron-resume'];
+    if (typeof resume === 'string' && resume.trim()) {
+      const v = resume.trim().toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes') out.resumeInterrupted = true;
+      else if (v === '0' || v === 'false' || v === 'no') out.resumeInterrupted = false;
+      else throw new HttpError(400, `x-iron-resume must be 1 or 0, not "${resume}".`);
+    }
     if (!out.provider && !out.profileId && typeof body.model === 'string') {
       const inferred = inferProvider(body.model);
       if (inferred) out.provider = inferred;
@@ -314,7 +321,7 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     res.writeHead(200, sseHeaders(req));
     const write = (ev: StreamEvent): void => {
       if (ev.type === 'switched') {
-        res.write(`: iron switched ${ev.fromProfileId} -> ${ev.toProfileId}\n\n`);
+        res.write(switchedComment(ev));
         return;
       }
       if (ev.type === 'start') {
@@ -364,7 +371,7 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     res.writeHead(200, sseHeaders(req));
     const write = (ev: StreamEvent): void => {
       if (ev.type === 'switched') {
-        res.write(`: iron switched ${ev.fromProfileId} -> ${ev.toProfileId}\n\n`);
+        res.write(switchedComment(ev));
         return;
       }
       if (ev.type === 'start') {
@@ -446,6 +453,10 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     if (sub === 'doctor' && method === 'GET') return send(res, 200, await client.doctor(), h);
     if (sub === 'discover' && method === 'GET')
       return send(res, 200, await client.discoverLogins(), h);
+    if (sub === 'usage' && method === 'GET' && !id) {
+      const profileId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('profileId');
+      return send(res, 200, await client.usageReport(profileId || undefined), h);
+    }
     if (sub === 'adopt' && method === 'POST') {
       const body = await readJson<{ provider?: ProviderId; home?: string; title?: string }>(req);
       if (typeof body.provider !== 'string' || typeof body.home !== 'string')
@@ -603,6 +614,11 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
       });
     },
   };
+}
+
+/** The SSE comment frame announcing a switch; `resumed` when the answer continues on the new account. */
+function switchedComment(ev: Extract<StreamEvent, { type: 'switched' }>): string {
+  return `: iron switched ${ev.fromProfileId} -> ${ev.toProfileId}${ev.resumed ? ' resumed' : ''}\n\n`;
 }
 
 function isSerialized(err: unknown): err is SerializedError {

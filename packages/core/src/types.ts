@@ -99,8 +99,12 @@ export interface QuotaSignal {
   resetAt?: string;
   /** Alternative to resetAt when only a relative delay is known. */
   retryAfterMs?: number;
-  /** Where the signal was read from. */
-  source: 'status' | 'header' | 'body' | 'cli-output';
+  /**
+   * Where the signal was read from. `usage` means no limit was hit: the router
+   * switched early because the account's last usage snapshot was nearly full
+   * (see FailoverPolicy.preemptAtUtilisation).
+   */
+  source: 'status' | 'header' | 'body' | 'cli-output' | 'usage';
   /** Short human-readable excerpt, safe to show in UI. Never contains secrets. */
   message?: string | undefined;
 }
@@ -212,7 +216,18 @@ export type StreamEvent =
   | { type: 'tool_call_end'; id: string }
   | { type: 'usage'; usage: Usage }
   | { type: 'finish'; finishReason: FinishReason }
-  | { type: 'switched'; fromProfileId: string; toProfileId: string; reason: QuotaSignal }
+  | {
+      type: 'switched';
+      fromProfileId: string;
+      toProfileId: string;
+      reason: QuotaSignal;
+      /**
+       * True when the answer is being continued on the new account after the old
+       * one hit a limit mid-stream (RunOptions.resumeInterrupted). The text events
+       * that follow carry on from where the earlier text stopped.
+       */
+      resumed?: true;
+    }
   | { type: 'error'; error: SerializedError };
 
 export interface SerializedError {
@@ -243,6 +258,13 @@ export interface RunOptions {
   includeRaw?: boolean;
   /** Per-attempt timeout in ms. Defaults to policy.requestTimeoutMs. */
   timeoutMs?: number;
+  /**
+   * Streaming only: when an account hits a limit after text has flowed (and no
+   * tool call is open), continue the answer on the next account of the same
+   * provider instead of ending with STREAM_INTERRUPTED. Overrides
+   * policy.resumeInterrupted for this request. See docs/FAILOVER.md.
+   */
+  resumeInterrupted?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -322,6 +344,19 @@ export interface FailoverPolicy {
   requestTimeoutMs: number;
   /** When true the router returns to the lowest-order ready profile automatically. */
   autoReturn: boolean;
+  /**
+   * Switch before the wall: an account whose last usage snapshot says at least
+   * this share (0..1) of its current window is used, with the reset still ahead,
+   * is tried after the others for this request. Nothing is parked or persisted.
+   * A value of 1 or more turns it off.
+   */
+  preemptAtUtilisation: number;
+  /**
+   * Continue a streamed answer on the next account when the current one hits a
+   * limit mid-stream (after text, with no tool call open). Off by default: the
+   * join between two accounts' text can occasionally show a seam.
+   */
+  resumeInterrupted: boolean;
   /** Per-provider overrides. */
   providers?: Partial<Record<ProviderId, Partial<Omit<FailoverPolicy, 'providers'>>>>;
 }
@@ -335,6 +370,8 @@ export const DEFAULT_POLICY: FailoverPolicy = {
   maxCooldownMs: 7 * 24 * 60 * 60_000,
   requestTimeoutMs: 10 * 60_000,
   autoReturn: true,
+  preemptAtUtilisation: 0.95,
+  resumeInterrupted: false,
 };
 
 /* ------------------------------------------------------------------ */
@@ -380,4 +417,77 @@ export interface AdoptLoginInput {
   /** The existing CLI home to use as-is. */
   home: string;
   title?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Usage history                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One finished request, as the usage history keeps it: when, how long, and the
+ * token counts the provider reported. Never prompt text, output, secrets or emails.
+ */
+export interface UsageRequestRecord {
+  /** When the request finished, ISO 8601. */
+  at: string;
+  durationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+}
+
+/** One park: when, why (the signal kind only) and until when. */
+export interface UsageParkRecord {
+  at: string;
+  kind: QuotaSignalKind;
+  until?: string;
+}
+
+/** One utilisation sample a lane reported (0..1 of the current window). */
+export interface UsageSampleRecord {
+  at: string;
+  utilisation: number;
+  resetAt?: string;
+}
+
+/** Everything the usage history holds for one profile, oldest first. */
+export interface ProfileUsageHistory {
+  requests: UsageRequestRecord[];
+  parks: UsageParkRecord[];
+  samples: UsageSampleRecord[];
+}
+
+export type UsageWindow = '1h' | '5h' | '24h' | '7d';
+
+export const USAGE_WINDOWS: readonly UsageWindow[] = ['1h', '5h', '24h', '7d'] as const;
+
+export interface UsageWindowTotals {
+  requests: number;
+  /** Sum of the input tokens providers reported; requests without a count add nothing. */
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * How long the current window lasts at the recent pace. Only produced from at
+ * least three utilisation samples of the current window with a rising trend.
+ */
+export interface UsageEstimate {
+  minutesLeft: number;
+  basis: 'utilisation-trend';
+  /** `medium` with six or more samples spanning ten minutes or more, else `low`. */
+  confidence: 'low' | 'medium';
+}
+
+/** One profile's usage, as `IronProxy.usageReport()` returns it. */
+export interface UsageReport {
+  profileId: string;
+  windows: Record<UsageWindow, UsageWindowTotals>;
+  /** Parks in the last seven days. */
+  parks7d: number;
+  lastParkedAt?: string;
+  /** The latest utilisation sample of the current window, when there is one. */
+  utilisation?: number;
+  resetAt?: string;
+  estimate?: UsageEstimate;
 }
