@@ -35,6 +35,12 @@ export interface CliLaneConfig {
   binary?: string;
   /** Extra environment variables passed to every spawn. */
   env?: Record<string, string>;
+  /**
+   * True when `home` is the vendor CLI's own default home (an existing login the
+   * user adopted) rather than a directory Iron-Proxy created. Iron-Proxy never
+   * deletes or prepares an adopted home, and logging out signs the user's own CLI out.
+   */
+  adopted?: boolean;
 }
 
 export interface ApiKeyLaneConfig {
@@ -216,6 +222,8 @@ export interface SerializedError {
   /** True when the caller may retry the same request. */
   retryable: boolean;
   details?: Record<string, unknown>;
+  /** Short imperative sentence telling the user what to do next. Never contains secrets or emails. */
+  hint?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,4 +348,36 @@ export interface CliProbe {
   path?: string;
   version?: string;
   homeEnv: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Existing logins                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A vendor CLI already signed in at its default home on this machine. Found by
+ * running the CLI's own status command; Iron-Proxy never reads its credential
+ * files, and no email or account identifier is ever part of this record.
+ */
+export interface DiscoveredLogin {
+  provider: ProviderId;
+  /** The vendor CLI's binary name, e.g. `claude`. */
+  binary: string;
+  /** Absolute path of the CLI's default home directory. */
+  home: string;
+  /** Whether the binary is on PATH. */
+  installed: boolean;
+  /** What the CLI's own status command said about that home. */
+  status: 'ok' | 'unauthenticated' | 'unknown';
+  /** Set when a profile already uses this home. */
+  adoptedProfileId?: string;
+  /** A title not yet taken, e.g. "Claude (existing login)". */
+  suggestedTitle: string;
+}
+
+export interface AdoptLoginInput {
+  provider: ProviderId;
+  /** The existing CLI home to use as-is. */
+  home: string;
+  title?: string;
 }

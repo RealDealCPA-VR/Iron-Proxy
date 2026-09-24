@@ -13,11 +13,14 @@ const { url, token } = await proxy.listen();
 
 Headers: `x-iron-provider` forces a provider, `x-iron-profile` pins an account, `authorization: Bearer <token>` unlocks `/iron/*`.
 
+Error bodies keep each dialect's shape and add an `iron` object: `{ code, retryable, details, hint }`, where `hint` is one sentence telling the user what to do next. `GET /iron/discover` lists vendor CLIs already signed in on this machine; `POST /iron/adopt` (`{ provider, home, title? }`) turns one into a profile in place.
+
 The HTTP client implements the same `IronClient` the React switcher and the Electron bridge use:
 
 ```ts
 import { HttpIronClient } from '@iron-proxy/proxy/client';
 const client = new HttpIronClient(url, token);
+// Failures throw HttpIronClientError with .status, .code, .details and .hint.
 ```
 
 Or just run it: `npx iron-proxy serve`. Full docs in the repository's `docs/` folder.

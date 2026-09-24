@@ -1,10 +1,13 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { rm } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { rm, stat } from 'node:fs/promises';
 import type {
+  AdoptLoginInput,
   CliProbe,
+  DiscoveredLogin,
   FailoverPolicy,
   IronEvent,
+  LaneKind,
   LoginSession,
   Profile,
   ProfileInput,
@@ -17,7 +20,13 @@ import type {
   UnifiedResponse,
 } from './types.js';
 import { PROVIDER_IDS } from './types.js';
-import { IronProxyError, ProfileNotFoundError } from './errors.js';
+import {
+  AllProfilesExhaustedError,
+  AuthRequiredError,
+  IronProxyError,
+  NoProfileError,
+  ProfileNotFoundError,
+} from './errors.js';
 import { TypedEmitter, type IronEmitter } from './events.js';
 import { createDefaultRegistry } from './adapters/index.js';
 import type { AdapterRegistry, FetchLike } from './adapters/types.js';
@@ -42,6 +51,38 @@ export interface IronProxyOptions {
   policy?: Partial<FailoverPolicy>;
   clock?: Clock;
   fetch?: FetchLike;
+  /**
+   * Environment used to find the vendor CLIs' default homes when discovering
+   * existing logins (CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME, HOME/USERPROFILE).
+   * Default `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
+}
+
+/** Short provider names used in suggested account titles, e.g. "Claude (existing login)". */
+export const PROVIDER_SHORT_NAMES: Readonly<Record<ProviderId, string>> = {
+  anthropic: 'Claude',
+  openai: 'Codex',
+  google: 'Gemini',
+  xai: 'Grok',
+  'openai-compatible': 'Custom',
+};
+
+/** Same directory? Resolved, and case-insensitive on Windows. */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const r = resolve(p);
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export function defaultDataDir(): string {
@@ -61,6 +102,7 @@ export class IronProxy {
   readonly events: IronEmitter;
   readonly router: Router;
   private readonly clock: Clock;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly logins = new Map<string, LoginSession>();
 
   constructor(opts: IronProxyOptions = {}) {
@@ -71,6 +113,7 @@ export class IronProxy {
     this.registry = opts.registry ?? createDefaultRegistry();
     this.events = new TypedEmitter<IronEvent>();
     this.clock = opts.clock ?? systemClock;
+    this.env = opts.env ?? process.env;
     this.router = new Router({
       profiles: this.profiles,
       states: this.states,
@@ -104,12 +147,23 @@ export class IronProxy {
    * Create a profile. For the CLI lane an isolated home directory is created
    * under `<dataDir>/cli-homes/<provider>/<id>` unless one is supplied.
    */
-  async createProfile(input: ProfileInput & { apiKeySecret?: string }): Promise<Profile> {
+  createProfile(input: ProfileInput & { apiKeySecret?: string }): Promise<Profile> {
+    return this.insertProfile(input, true);
+  }
+
+  private async insertProfile(
+    input: ProfileInput & { apiKeySecret?: string },
+    refresh: boolean,
+  ): Promise<Profile> {
     if (!PROVIDER_IDS.includes(input.provider)) {
-      throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${input.provider}".`);
+      throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${input.provider}".`, {
+        hint: `Use one of: ${PROVIDER_IDS.join(', ')}.`,
+      });
     }
     if (!input.title?.trim())
-      throw new IronProxyError('INVALID_REQUEST', 'A profile needs a title.');
+      throw new IronProxyError('INVALID_REQUEST', 'A profile needs a title.', {
+        hint: 'Give the account a title you will recognise, e.g. "Work Claude".',
+      });
     if (input.lane === 'oauth' && !input.oauth?.extension) {
       throw new IronProxyError(
         'INVALID_REQUEST',
@@ -147,12 +201,13 @@ export class IronProxy {
       const lane = this.registry.laneFor(profile);
       if (lane instanceof CliLane) await lane.ensureHome(profile);
     } else if (input.lane === 'api-key') {
-      const secretRef = input.apiKey?.secretRef ?? `apikey:${id}`;
+      const secretRef = input.apiKey?.secretRef || `apikey:${id}`; // an empty ref means "assign one"
       profile.apiKey = { ...(input.apiKey ?? {}), secretRef };
       if (input.provider === 'openai-compatible' && !profile.apiKey.baseUrl) {
         throw new IronProxyError(
           'INVALID_REQUEST',
           'An openai-compatible profile needs apiKey.baseUrl.',
+          { hint: "Pass the server's /v1 URL, e.g. --base-url http://127.0.0.1:11434/v1." },
         );
       }
       if (input.apiKeySecret) await this.vault.set(secretRef, input.apiKeySecret);
@@ -167,7 +222,7 @@ export class IronProxy {
     await this.profiles.put(profile);
     await this.states.put({ profileId: id, status: 'unknown', served: 0 });
     this.events.emit({ type: 'profile.created', profile });
-    void this.refreshStatus(id).catch(() => {});
+    if (refresh) void this.refreshStatus(id).catch(() => {});
     return profile;
   }
 
@@ -200,13 +255,22 @@ export class IronProxy {
     return p;
   }
 
-  /** Delete the profile, its secrets and (for CLI profiles) its isolated home directory. */
+  /**
+   * Delete the profile, its secrets and (for CLI profiles) its isolated home
+   * directory. Only directories Iron-Proxy created under `<dataDir>/cli-homes`
+   * are removed; an adopted home is never touched.
+   */
   async deleteProfile(id: string, opts: { keepFiles?: boolean } = {}): Promise<void> {
     const p = await this.getProfile(id);
     this.logins.get(id)?.cancel();
     if (p.apiKey?.secretRef) await this.vault.delete(p.apiKey.secretRef).catch(() => {});
     if (p.oauth?.secretRef) await this.vault.delete(p.oauth.secretRef).catch(() => {});
-    if (p.cli?.home && !opts.keepFiles && p.cli.home.startsWith(join(this.dataDir, 'cli-homes'))) {
+    if (
+      p.cli?.home &&
+      !p.cli.adopted &&
+      !opts.keepFiles &&
+      p.cli.home.startsWith(join(this.dataDir, 'cli-homes'))
+    ) {
       await rm(p.cli.home, { recursive: true, force: true }).catch(() => {});
     }
     await this.profiles.delete(id);
@@ -246,13 +310,121 @@ export class IronProxy {
   async setApiKey(id: string, secret: string): Promise<void> {
     const p = await this.getProfile(id);
     if (p.lane !== 'api-key' || !p.apiKey)
-      throw new IronProxyError('INVALID_REQUEST', 'Profile is not an API-key profile.');
+      throw new IronProxyError('INVALID_REQUEST', 'Profile is not an API-key profile.', {
+        hint: 'Only API-key accounts take a key; log subscription accounts in with iron-proxy login <id>.',
+      });
     await this.vault.set(p.apiKey.secretRef, secret);
     const st = await this.router.state(id);
     st.status = 'ready';
     delete st.lastError;
     await this.states.put(st);
     this.events.emit({ type: 'profile.state', state: st });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Existing logins                                                  */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Vendor CLIs already signed in at their default home on this machine. Runs
+   * each CLI's own status command against that home; never reads credential
+   * files, never persists anything and never reports an email.
+   */
+  async discoverLogins(): Promise<DiscoveredLogin[]> {
+    const profiles = await this.profiles.list();
+    const taken = new Set(profiles.map((p) => p.title));
+    const out: DiscoveredLogin[] = [];
+    for (const adapter of this.registry.list()) {
+      const lane = adapter.lanes.cli;
+      if (!(lane instanceof CliLane)) continue;
+      const found = lane.spec.defaultHome?.(this.env);
+      if (!found) continue;
+      const home = resolve(found);
+      if (!(await isDirectory(home))) continue;
+      // A throwaway profile, never stored: `adopted` keeps ensureHome from touching the directory.
+      const probe: Profile = {
+        id: `discover-${adapter.id}`,
+        title: lane.spec.displayName,
+        provider: adapter.id,
+        lane: 'cli',
+        order: 0,
+        enabled: true,
+        cli: { home, adopted: true },
+        createdAt: '',
+        updatedAt: '',
+      };
+      const installed = !!(await lane.findBinary(probe));
+      const status = installed
+        ? await lane.checkAuth(probe).catch(() => 'unknown' as const)
+        : 'unknown';
+      const owner = profiles.find((p) => !!p.cli?.home && samePath(p.cli.home, home));
+      const suggestedTitle = freeTitle(
+        `${PROVIDER_SHORT_NAMES[adapter.id]} (existing login)`,
+        taken,
+      );
+      taken.add(suggestedTitle);
+      out.push({
+        provider: adapter.id,
+        binary: lane.spec.binary,
+        home,
+        installed,
+        status,
+        ...(owner ? { adoptedProfileId: owner.id } : {}),
+        suggestedTitle,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Turn an existing CLI login into a profile, as-is: the profile's home is that
+   * directory, nothing is copied, and deleting the profile never removes it.
+   */
+  async adoptLogin(input: AdoptLoginInput): Promise<Profile> {
+    if (!input || !PROVIDER_IDS.includes(input.provider))
+      throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${input?.provider}".`, {
+        hint: `Use one of: ${PROVIDER_IDS.join(', ')}.`,
+      });
+    const lane = this.registry.get(input.provider).lanes.cli;
+    if (!(lane instanceof CliLane))
+      throw new IronProxyError(
+        'UNSUPPORTED',
+        `Provider "${input.provider}" has no vendor CLI to adopt a login from.`,
+        { hint: 'Adopt a Claude, Codex or Grok login, or add this provider with an API key.' },
+      );
+    if (typeof input.home !== 'string' || !input.home.trim())
+      throw new IronProxyError('INVALID_REQUEST', 'Adopting a login needs its home directory.', {
+        hint: 'Run iron-proxy profiles discover to see the logins found on this computer.',
+      });
+    const home = resolve(input.home.trim());
+    if (!(await isDirectory(home)))
+      throw new IronProxyError('INVALID_REQUEST', `No CLI home directory at "${home}".`, {
+        details: { home },
+        hint: `Sign in with ${lane.spec.displayName} itself first, or pass the directory it uses with --home.`,
+      });
+    const existing = await this.profiles.list();
+    const owner = existing.find((p) => !!p.cli?.home && samePath(p.cli.home, home));
+    if (owner)
+      throw new IronProxyError(
+        'INVALID_REQUEST',
+        `Profile "${owner.title}" already uses "${home}".`,
+        {
+          details: { home, profileId: owner.id },
+          hint: `Use the existing profile ${owner.id}; two profiles on one login would fail over onto the same account.`,
+        },
+      );
+    const title =
+      input.title?.trim() ||
+      freeTitle(
+        `${PROVIDER_SHORT_NAMES[input.provider]} (existing login)`,
+        new Set(existing.map((p) => p.title)),
+      );
+    const profile = await this.insertProfile(
+      { title, provider: input.provider, lane: 'cli', cli: { home, adopted: true } },
+      false,
+    );
+    await this.refreshStatus(profile.id).catch(() => []);
+    return profile;
   }
 
   /* ---------------------------------------------------------------- */
@@ -358,6 +530,110 @@ export class IronProxy {
   }
 
   /* ---------------------------------------------------------------- */
+  /* Picking an account for the user's own terminal                   */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * The account a request for `provider` would try first right now: enabled,
+   * on `lane` (default `cli`; `any` for every lane), not parked (a park whose
+   * cooldown has passed is cleared, exactly as the router does), not signed out,
+   * lowest order. With `profileId`, that profile, if it is an enabled account of
+   * that provider on that lane.
+   *
+   * Throws NoProfileError when there is no such account, AllProfilesExhaustedError
+   * (with the earliest reset) when the rest are parked, and AuthRequiredError when
+   * every one needs to sign in again.
+   */
+  async pickProfile(
+    provider: ProviderId,
+    opts: { profileId?: string; lane?: LaneKind | 'any' } = {},
+  ): Promise<Profile> {
+    if (!PROVIDER_IDS.includes(provider))
+      throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${provider}".`, {
+        hint: `Use one of: ${PROVIDER_IDS.join(', ')}.`,
+      });
+    const lane = opts.lane ?? 'cli';
+    const onLane = (p: Profile) => lane === 'any' || p.lane === lane;
+    if (opts.profileId) {
+      const p = await this.getProfile(opts.profileId);
+      if (p.provider !== provider || !onLane(p))
+        throw new IronProxyError(
+          'INVALID_REQUEST',
+          `Profile "${p.title}" is a ${p.provider} ${p.lane} account, not a ${provider}${lane === 'any' ? '' : ` ${lane}`} one.`,
+          {
+            details: { profileId: p.id, provider: p.provider, lane: p.lane },
+            hint: `Pick one of the ${provider} accounts that iron-proxy profiles list shows${lane === 'any' ? '' : ` with lane ${lane}`}.`,
+          },
+        );
+      if (!p.enabled)
+        throw new IronProxyError('INVALID_REQUEST', `Profile "${p.title}" is disabled.`, {
+          details: { profileId: p.id },
+          hint: `Enable it first: iron-proxy profiles enable ${p.id}.`,
+        });
+      await this.router.availability(p, { profileId: p.id });
+      return p;
+    }
+    const candidates = (await this.router.candidates(provider)).filter(onLane);
+    if (!candidates.length) throw new NoProfileError(provider);
+    let earliest: string | undefined;
+    let parked = false;
+    let signedOut: Profile | undefined;
+    for (const p of candidates) {
+      const { usable, state } = await this.router.availability(p);
+      if (usable) return p;
+      if (state.status === 'parked') {
+        parked = true;
+        const until = state.parkedUntil;
+        if (until && (!earliest || until < earliest)) earliest = until;
+      } else if (state.status === 'unauthenticated') signedOut ??= p;
+    }
+    if (parked)
+      throw new AllProfilesExhaustedError(
+        provider,
+        earliest,
+        candidates.map((p) => p.id),
+      );
+    if (signedOut)
+      throw new AuthRequiredError(
+        signedOut.id,
+        `Every ${provider} account needs to log in again.`,
+        { title: signedOut.title, lane: signedOut.lane },
+      );
+    throw new NoProfileError(provider);
+  }
+
+  /**
+   * The command that starts this CLI profile's vendor CLI interactively, `args`
+   * appended, with the lane's scrubbed environment. Creates an isolated home that
+   * is missing; never touches an adopted one.
+   */
+  async interactiveCommand(
+    id: string,
+    args: string[] = [],
+  ): Promise<{ binary: string; args: string[]; env: Record<string, string> }> {
+    const p = await this.getProfile(id);
+    const lane = this.cliLaneOf(p);
+    await lane.ensureHome(p);
+    return lane.interactiveCommand(p, args);
+  }
+
+  /** The variables a user's own shell sets and clears to run this CLI profile's vendor CLI. */
+  async shellEnv(id: string): Promise<{ set: Record<string, string>; unset: string[] }> {
+    const p = await this.getProfile(id);
+    return this.cliLaneOf(p).shellEnv(p);
+  }
+
+  private cliLaneOf(p: Profile): CliLane {
+    const lane = p.lane === 'cli' ? this.registry.laneFor(p) : undefined;
+    if (!(lane instanceof CliLane))
+      throw new IronProxyError('UNSUPPORTED', `Profile "${p.title}" is not a vendor CLI account.`, {
+        details: { profileId: p.id, lane: p.lane },
+        hint: 'Pick a cli-lane account; API-key accounts are used through iron-proxy chat or the proxy.',
+      });
+    return lane;
+  }
+
+  /* ---------------------------------------------------------------- */
   /* State + diagnostics                                              */
   /* ---------------------------------------------------------------- */
 
@@ -424,6 +700,14 @@ export class IronProxy {
     this.logins.clear();
     if (this.states instanceof FileStateStore) await this.states.flush();
     this.events.removeAll();
+  }
+}
+
+function freeTitle(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const t = `${base} ${n}`;
+    if (!taken.has(t)) return t;
   }
 }
 

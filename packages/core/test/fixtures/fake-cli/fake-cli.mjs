@@ -8,13 +8,26 @@
  *   FAKE_CLI_MODE     ok | quota | auth | overload | crash | slow (default ok)
  *   FAKE_CLI_MARKER   file name inside the home dir that means "logged in"
  *
+ * `echo-run [--exit N] ...` prints {args, homeEnv, home, keys, extra} as JSON and
+ * exits with N, standing in for an interactive session (`iron-proxy run`).
+ *
  * The home dir is read from the flavor's env var (CLAUDE_CONFIG_DIR, CODEX_HOME,
  * GROK_HOME, GEMINI_CLI_HOME). `login` creates the marker; `logout` removes it.
  */
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const flavor = process.env.FAKE_CLI_FLAVOR ?? 'claude';
+// Without FAKE_CLI_FLAVOR the flavor follows the home variable that is set, so
+// one fixture can stand in for every vendor CLI (as discoverLogins runs them).
+const flavor =
+  process.env.FAKE_CLI_FLAVOR ??
+  (process.env.CODEX_HOME
+    ? 'codex'
+    : process.env.GROK_HOME
+      ? 'grok'
+      : process.env.GEMINI_CLI_HOME
+        ? 'gemini'
+        : 'claude');
 const mode = process.env.FAKE_CLI_MODE ?? 'ok';
 const homeEnv = {
   claude: 'CLAUDE_CONFIG_DIR',
@@ -41,6 +54,23 @@ writeFileSync(
     env: { [homeEnv]: home, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null },
   }),
 );
+
+// `echo-run [--exit N] ...`: stands in for an interactive session started by
+// `iron-proxy run`. Reports what it was started with, then exits with N.
+if (args[0] === 'echo-run') {
+  const i = args.indexOf('--exit');
+  out({
+    args: args.slice(1),
+    homeEnv,
+    home,
+    keys: {
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    },
+    extra: process.env.FAKE_EXTRA ?? null,
+  });
+  process.exit(i >= 0 ? Number(args[i + 1]) : 0);
+}
 
 const isStatus =
   (args[0] === 'auth' && args[1] === 'status') ||

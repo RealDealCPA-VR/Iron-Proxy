@@ -63,6 +63,11 @@ export function ErrorBanner({ error, onDismiss }: { error: ClientError; onDismis
         <strong>{labels.errorPrefix}</strong>
         {error.code ? <span className="iron-banner-code">{error.code}</span> : null}
         <div>{error.message}</div>
+        {error.hint ? (
+          <div className="iron-banner-hint" data-testid="error-hint">
+            {error.hint}
+          </div>
+        ) : null}
       </div>
       {onDismiss ? (
         <button type="button" className="iron-btn iron-btn--ghost iron-btn--sm" onClick={onDismiss}>

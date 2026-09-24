@@ -88,7 +88,12 @@ function retryAfterSeconds(details: Record<string, unknown> | undefined): number
 }
 
 export function errorBody(dialect: Dialect, err: SerializedError): Record<string, unknown> {
-  const iron = { code: err.code, retryable: err.retryable, details: err.details ?? {} };
+  const iron = {
+    code: err.code,
+    retryable: err.retryable,
+    details: err.details ?? {},
+    ...(err.hint ? { hint: err.hint } : {}),
+  };
   if (dialect === 'openai') {
     return {
       error: {
@@ -439,6 +444,23 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
     if (sub === 'providers' && method === 'GET') return send(res, 200, await client.providers(), h);
     if (sub === 'states' && method === 'GET') return send(res, 200, await client.states(), h);
     if (sub === 'doctor' && method === 'GET') return send(res, 200, await client.doctor(), h);
+    if (sub === 'discover' && method === 'GET')
+      return send(res, 200, await client.discoverLogins(), h);
+    if (sub === 'adopt' && method === 'POST') {
+      const body = await readJson<{ provider?: ProviderId; home?: string; title?: string }>(req);
+      if (typeof body.provider !== 'string' || typeof body.home !== 'string')
+        throw new HttpError(400, '`provider` and `home` are required.');
+      return send(
+        res,
+        201,
+        await client.adoptLogin({
+          provider: body.provider,
+          home: body.home,
+          ...(typeof body.title === 'string' && body.title ? { title: body.title } : {}),
+        }),
+        h,
+      );
+    }
     if (sub === 'refresh' && method === 'POST') {
       const body = await readJson<{ id?: string }>(req);
       return send(res, 200, await client.refreshStatus(body.id), h);

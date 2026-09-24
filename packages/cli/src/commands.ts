@@ -1,11 +1,20 @@
+import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { Writable } from 'node:stream';
 import { parseArgs } from 'node:util';
 import {
+  CliError,
+  CliLane,
+  CLI_SPECS,
   createIronProxy,
   defaultDataDir,
+  installHint,
   IronProxyError,
   PROVIDER_IDS,
+  PROVIDER_SHORT_NAMES,
+  which,
   type IronProxy,
   type LaneKind,
   type Profile,
@@ -14,6 +23,7 @@ import {
   type UnifiedRequest,
 } from '@iron-proxy/core';
 import { createProxyServer } from '@iron-proxy/proxy';
+import { buildLaunch, launchInteractive, type SpawnFn } from './launch.js';
 
 export interface CliIo {
   stdout: { write(s: string): unknown };
@@ -25,14 +35,26 @@ export interface CliIo {
   /** Called by `serve` to wait for shutdown; default waits for SIGINT/SIGTERM. */
   waitForShutdown?: () => Promise<void>;
   env?: NodeJS.ProcessEnv;
+  /** Starts the vendor CLI for `run` (tests pass one that pipes stdio). Default `child_process.spawn`. */
+  spawn?: SpawnFn;
+  /**
+   * Asks one question and resolves with the answer line (for `setup`). With
+   * `secret`, the answer must not be echoed. Default: node:readline on stdin/stdout.
+   */
+  prompt?: (question: string, opts?: { secret?: boolean }) => Promise<string>;
+  /** Platform used for defaults such as the `env` shell. Default `process.platform`. */
+  platform?: NodeJS.Platform;
 }
 
 const HELP = `iron-proxy — bring-your-own-subscription account switching for AI providers
 
 Usage:
+  iron-proxy setup [--yes]
   iron-proxy serve [--port 8791] [--host 127.0.0.1] [--token T] [--data-dir D] [--cors]
   iron-proxy profiles list [--json]
   iron-proxy profiles add --provider P --lane cli|api-key --title T [--model M] [--api-key-stdin] [--base-url URL]
+  iron-proxy profiles discover [--json]
+  iron-proxy profiles adopt <provider> [--home DIR] [--title T]
   iron-proxy profiles rename <id> <title>
   iron-proxy profiles remove <id>
   iron-proxy profiles reorder <provider> <id> [<id> ...]
@@ -43,6 +65,8 @@ Usage:
   iron-proxy doctor [--json]
   iron-proxy models <id>
   iron-proxy chat <provider-or-model> [-m model] [--profile id] "prompt"
+  iron-proxy run <provider> [--profile id] [-- extra args for the vendor CLI]
+  iron-proxy env <provider> [--profile id] [--shell bash|powershell|cmd]
 
 Providers: ${PROVIDER_IDS.join(', ')}
 Data dir:  --data-dir or IRON_PROXY_DATA_DIR (default ~/.iron-proxy)
@@ -71,6 +95,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'api-key-stdin': { type: 'boolean' },
         'base-url': { type: 'string' },
         profile: { type: 'string' },
+        home: { type: 'string' },
+        shell: { type: 'string' },
+        yes: { type: 'boolean', short: 'y' },
       },
     });
   } catch (err) {
@@ -114,33 +141,23 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       case 'login': {
         const id = need(rest[0], 'profile id');
         if (values.terminal) {
-          const cmdInfo = await iron.loginCommand(id);
-          const envLine = Object.entries(cmdInfo.env)
-            .filter(([k]) => /^(CLAUDE_CONFIG_DIR|CODEX_HOME|GROK_HOME|GEMINI_CLI_HOME)$/.test(k))
-            .map(([k, v]) => (process.platform === 'win32' ? `$env:${k}="${v}";` : `${k}="${v}"`))
-            .join(' ');
-          out(
-            `Run this in a terminal window:\n\n  ${envLine} ${quote(cmdInfo.binary)} ${cmdInfo.args.map(quote).join(' ')}\n`,
-          );
-          if (cmdInfo.requiresTerminal)
-            out('This CLI has no headless login; it signs in interactively on first run.');
+          await printTerminalLogin(iron, id, out);
           return 0;
         }
-        const session = await iron.login(id);
-        session.on((e) => {
-          if (e.type === 'url') out(`Open this URL to sign in: ${e.url}`);
-          else if (e.type === 'code') out(`Enter this code: ${e.code}`);
-          else if (e.type === 'output') err(`  ${e.line}`);
-          else if (e.type === 'completed') out('Logged in.');
-          else if (e.type === 'failed') err(`Login failed: ${e.message}`);
-        });
-        await session.done;
+        await headlessLogin(iron, id, out, err);
         return 0;
       }
-      case 'logout':
-        await iron.logout(need(rest[0], 'profile id'));
+      case 'logout': {
+        const id = need(rest[0], 'profile id');
+        const p = await iron.getProfile(id);
+        await iron.logout(id);
         out('Logged out.');
+        if (p.cli?.adopted)
+          err(
+            `Note: "${p.title}" was an existing login, so your own ${p.provider} CLI is signed out too.`,
+          );
         return 0;
+      }
       case 'status':
         return await status(iron, io, json);
       case 'doctor': {
@@ -170,6 +187,18 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       }
       case 'chat':
         return await chat(iron, io, rest, values as Record<string, string | boolean | undefined>);
+      case 'run':
+        return await runVendor(iron, io, rest, values.profile as string | undefined);
+      case 'env':
+        return await envLines(
+          iron,
+          io,
+          rest,
+          values.profile as string | undefined,
+          values.shell as string | undefined,
+        );
+      case 'setup':
+        return await setup(iron, io, !!values.yes);
       default:
         err(`Unknown command "${cmd}".\n\n${HELP}`);
         return 2;
@@ -177,10 +206,47 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   } catch (e) {
     if (e instanceof IronProxyError) err(`${e.code}: ${e.message}`);
     else err((e as Error).message ?? String(e));
+    const hint = (e as { hint?: unknown } | undefined)?.hint;
+    if (typeof hint === 'string' && hint) err(`hint: ${hint}`);
     return 1;
   } finally {
     if (own && cmd !== 'serve') await iron.close();
   }
+}
+
+async function printTerminalLogin(
+  iron: IronProxy,
+  id: string,
+  out: (s: string) => void,
+): Promise<void> {
+  const cmdInfo = await iron.loginCommand(id);
+  const envLine = Object.entries(cmdInfo.env)
+    .filter(([k]) => /^(CLAUDE_CONFIG_DIR|CODEX_HOME|GROK_HOME|GEMINI_CLI_HOME)$/.test(k))
+    .map(([k, v]) => (process.platform === 'win32' ? `$env:${k}="${v}";` : `${k}="${v}"`))
+    .join(' ');
+  out(
+    `Run this in a terminal window:\n\n  ${envLine} ${quote(cmdInfo.binary)} ${cmdInfo.args.map(quote).join(' ')}\n`,
+  );
+  if (cmdInfo.requiresTerminal)
+    out('This CLI has no headless login; it signs in interactively on first run.');
+}
+
+/** Run the vendor CLI's own headless login, printing the URL and code it shows. */
+async function headlessLogin(
+  iron: IronProxy,
+  id: string,
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<void> {
+  const session = await iron.login(id);
+  session.on((e) => {
+    if (e.type === 'url') out(`Open this URL to sign in: ${e.url}`);
+    else if (e.type === 'code') out(`Enter this code: ${e.code}`);
+    else if (e.type === 'output') err(`  ${e.line}`);
+    else if (e.type === 'completed') out('Logged in.');
+    else if (e.type === 'failed') err(`Login failed: ${e.message}`);
+  });
+  await session.done;
 }
 
 function need(v: string | undefined, what: string): string {
@@ -308,6 +374,57 @@ async function profiles(
       );
       return 0;
     }
+    case 'discover': {
+      const found = await iron.discoverLogins();
+      if (json) out(JSON.stringify(found, null, 2));
+      else if (!found.length)
+        out('No existing vendor CLI logins found in their default locations on this computer.');
+      else
+        out(
+          table(
+            ['provider', 'home', 'installed', 'signed in', 'already adopted'],
+            found.map((f) => [
+              f.provider,
+              f.home,
+              f.installed ? 'yes' : 'no',
+              f.status === 'ok' ? 'yes' : f.status === 'unauthenticated' ? 'no' : '?',
+              f.adoptedProfileId ?? 'no',
+            ]),
+          ),
+        );
+      return 0;
+    }
+    case 'adopt': {
+      const provider = need(args[0], 'provider') as ProviderId;
+      if (!PROVIDER_IDS.includes(provider))
+        throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${provider}".`, {
+          hint: `Use one of: ${PROVIDER_IDS.join(', ')}.`,
+        });
+      let home = typeof v.home === 'string' ? v.home : undefined;
+      if (!home) {
+        home = (await iron.discoverLogins()).find((f) => f.provider === provider)?.home;
+        if (!home)
+          throw new IronProxyError(
+            'INVALID_REQUEST',
+            `No existing ${provider} CLI login found in its default location.`,
+            {
+              hint: 'Run iron-proxy profiles discover to see what was found, or pass the directory with --home DIR.',
+            },
+          );
+      }
+      const p = await iron.adoptLogin({
+        provider,
+        home,
+        ...(typeof v.title === 'string' ? { title: v.title } : {}),
+      });
+      const st = (await iron.allStates())[p.id]?.status ?? 'unknown';
+      out(
+        json
+          ? JSON.stringify(p, null, 2)
+          : `Adopted ${p.cli?.home} as ${p.id} ("${p.title}", ${st}). Iron-Proxy will never delete that directory.${st === 'unauthenticated' ? ` Next: iron-proxy login ${p.id}` : ''}`,
+      );
+      return 0;
+    }
     case 'rename': {
       const p = await iron.updateProfile(need(args[0], 'profile id'), {
         title: need(args[1], 'new title'),
@@ -431,6 +548,7 @@ async function chat(
     else if (ev.type === 'error') {
       failed = true;
       io.stderr.write(`\n[iron] ${ev.error.code}: ${ev.error.message}\n`);
+      if (ev.error.hint) io.stderr.write(`hint: ${ev.error.hint}\n`);
     }
   }
   io.stdout.write('\n');
@@ -439,6 +557,319 @@ async function chat(
     io.stderr.write(`[iron] served by ${p ? `"${p.title}"` : served} (${served})\n`);
   }
   return failed ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* run / env: the user's own terminal as one of their accounts          */
+/* ------------------------------------------------------------------ */
+
+function needProvider(v: string | undefined, usage: string): ProviderId {
+  if (!v) throw new IronProxyError('INVALID_REQUEST', `Usage: ${usage}`);
+  if (!PROVIDER_IDS.includes(v as ProviderId))
+    throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${v}".`, {
+      hint: `Use one of: ${PROVIDER_IDS.join(', ')}.`,
+    });
+  return v as ProviderId;
+}
+
+/**
+ * `run <provider>`: start the vendor CLI interactively as the account the router
+ * would use first right now. The session stays on that account; the next `run`
+ * picks again.
+ */
+async function runVendor(
+  iron: IronProxy,
+  io: CliIo,
+  rest: string[],
+  profileId: string | undefined,
+): Promise<number> {
+  const [target, ...extra] = rest;
+  const provider = needProvider(target, 'run <provider> [--profile id] [-- extra args]');
+  const p = await iron.pickProfile(provider, {
+    lane: 'cli',
+    ...(profileId ? { profileId } : {}),
+  });
+  const cmd = await iron.interactiveCommand(p.id, extra);
+  const resolved = await which(cmd.binary);
+  if (!resolved)
+    throw new CliError('CLI_NOT_FOUND', `"${cmd.binary}" is not installed or not on PATH.`, {
+      binary: cmd.binary,
+    });
+  io.stderr.write(`Using "${p.title}" (${p.provider})\n`);
+  return launchInteractive(io.spawn ?? nodeSpawn, buildLaunch(resolved, cmd.args), cmd.env);
+}
+
+type ShellKind = 'bash' | 'powershell' | 'cmd';
+
+/** Single-quoted for POSIX shells: ' becomes '\''. */
+function shQuote(v: string): string {
+  return `'${v.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Single-quoted for PowerShell: ' becomes ''. */
+function psQuote(v: string): string {
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/**
+ * `env <provider>`: the lines that make the user's own shell act as that
+ * account. Only the home variable (and the profile's own cli.env entries) are
+ * set; API-key variables are cleared for bash and PowerShell. Never PATH, never
+ * a secret.
+ */
+async function envLines(
+  iron: IronProxy,
+  io: CliIo,
+  rest: string[],
+  profileId: string | undefined,
+  shellOpt: string | undefined,
+): Promise<number> {
+  const provider = needProvider(
+    rest[0],
+    'env <provider> [--profile id] [--shell bash|powershell|cmd]',
+  );
+  const shell = (shellOpt ??
+    ((io.platform ?? process.platform) === 'win32' ? 'powershell' : 'bash')) as ShellKind;
+  if (!['bash', 'powershell', 'cmd'].includes(shell))
+    throw new IronProxyError('INVALID_REQUEST', `Unknown shell "${shellOpt}".`, {
+      hint: 'Use --shell bash (also zsh), --shell powershell or --shell cmd.',
+    });
+  const p = await iron.pickProfile(provider, {
+    lane: 'cli',
+    ...(profileId ? { profileId } : {}),
+  });
+  const { set, unset } = await iron.shellEnv(p.id);
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(set)) {
+    if (shell === 'bash') lines.push(`export ${k}=${shQuote(v)}`);
+    else if (shell === 'powershell') lines.push(`$env:${k} = ${psQuote(v)}`);
+    else lines.push(`set "${k}=${v}"`);
+  }
+  if (shell === 'bash' && unset.length) lines.push(`unset ${unset.join(' ')}`);
+  if (shell === 'powershell')
+    for (const k of unset) lines.push(`Remove-Item Env:${k} -ErrorAction SilentlyContinue`);
+  io.stdout.write(`${lines.join('\n')}\n`);
+  io.stderr.write(`Using "${p.title}" (${p.provider})\n`);
+  io.stderr.write(
+    shell === 'cmd'
+      ? `Note: these lines set the account's home only; API-key variables are unset only by iron-proxy run ${provider}, so clear them yourself if they are set.\n`
+      : `Note: these lines set the account's home and clear API-key variables in this shell; only iron-proxy run ${provider} starts the CLI with a fully scrubbed environment.\n`,
+  );
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* setup: guided first run                                              */
+/* ------------------------------------------------------------------ */
+
+type Ask = (question: string, opts?: { secret?: boolean }) => Promise<string>;
+
+/** A prompt on the terminal via node:readline. A secret answer is not echoed. */
+function readlinePrompt(): { ask: Ask; close(): void } {
+  let muted = false;
+  const output = new Writable({
+    write(chunk: Buffer | string, _enc, cb) {
+      if (!muted) process.stdout.write(chunk);
+      cb();
+    },
+  });
+  const rl = createInterface({
+    input: process.stdin,
+    output,
+    terminal: !!process.stdin.isTTY,
+  });
+  let closed = false;
+  rl.on('close', () => (closed = true));
+  const ask: Ask = (question, opts = {}) =>
+    new Promise((resolve) => {
+      if (closed) return resolve('');
+      const onClose = () => resolve('');
+      rl.once('close', onClose);
+      if (opts.secret) {
+        process.stdout.write(question);
+        muted = true;
+      }
+      rl.question(opts.secret ? '' : question, (answer) => {
+        rl.off('close', onClose);
+        if (opts.secret) {
+          muted = false;
+          process.stdout.write('\n');
+        }
+        resolve(answer);
+      });
+    });
+  return { ask, close: () => rl.close() };
+}
+
+function isYes(answer: string, byDefault: boolean): boolean {
+  const a = answer.trim().toLowerCase();
+  if (!a) return byDefault;
+  return a === 'y' || a === 'yes';
+}
+
+function freeTitle(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base} ${n}`)) return `${base} ${n}`;
+}
+
+/** Ask until the answer is one of `choices` (by number or name); gives up after three tries. */
+async function choose<T extends string>(
+  ask: Ask,
+  out: (s: string) => void,
+  question: string,
+  choices: Array<{ value: T; label: string }>,
+): Promise<T> {
+  out(choices.map((c, i) => `  ${i + 1}) ${c.label}`).join('\n'));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const a = (await ask(`${question} [1-${choices.length}]: `)).trim();
+    const byNumber = choices[Number(a) - 1];
+    const picked = /^\d+$/.test(a) ? byNumber : choices.find((c) => c.value === a);
+    if (picked) return picked.value;
+    out(`Please answer with a number from 1 to ${choices.length}.`);
+  }
+  throw new IronProxyError('INVALID_REQUEST', 'No valid choice given.', {
+    hint: 'Run iron-proxy setup again, or add the account with iron-proxy profiles add.',
+  });
+}
+
+/** `setup`: doctor, adopt existing logins, add accounts, show the result. */
+async function setup(iron: IronProxy, io: CliIo, yes: boolean): Promise<number> {
+  const out = (s: string) => io.stdout.write(s.endsWith('\n') ? s : `${s}\n`);
+  const errLine = (s: string) => io.stderr.write(s.endsWith('\n') ? s : `${s}\n`);
+  const own = !io.prompt && !yes ? readlinePrompt() : undefined;
+  const ask: Ask = io.prompt ?? own?.ask ?? (async () => '');
+  const report = (e: unknown) => {
+    errLine(
+      e instanceof IronProxyError ? `${e.code}: ${e.message}` : String((e as Error).message ?? e),
+    );
+    const hint = (e as { hint?: unknown } | undefined)?.hint;
+    if (typeof hint === 'string' && hint) errLine(`hint: ${hint}`);
+  };
+  try {
+    // 1. Which vendor CLIs are installed.
+    out('\n== 1. Vendor CLIs on this computer ==');
+    for (const adapter of iron.registry.list()) {
+      const lane = adapter.lanes.cli;
+      if (!(lane instanceof CliLane)) continue;
+      const path = await lane.findBinary();
+      const official = CLI_SPECS.find((s) => s.provider === adapter.id)?.binary ?? lane.spec.binary;
+      if (path) out(`  ${official.padEnd(7)} installed   (${adapter.id})`);
+      else out(`  ${official.padEnd(7)} missing     (${adapter.id})  ${installHint(official)}`);
+    }
+
+    // 2. Existing logins.
+    out('\n== 2. Existing logins ==');
+    const found = await iron.discoverLogins();
+    const usable = found.filter((f) => f.status === 'ok' && !f.adoptedProfileId);
+    if (!usable.length) out('  No new signed-in vendor CLI logins found.');
+    for (const f of usable) {
+      const take = yes || isYes(await ask(`Use "${f.suggestedTitle}" as an account? [Y/n] `), true);
+      if (!take) continue;
+      try {
+        const p = await iron.adoptLogin({
+          provider: f.provider,
+          home: f.home,
+          title: f.suggestedTitle,
+        });
+        out(`  Added "${p.title}" (${p.provider}), using ${f.home} as-is.`);
+      } catch (e) {
+        report(e);
+      }
+    }
+
+    // 3. More accounts.
+    if (!yes) {
+      out('\n== 3. More accounts ==');
+      while (isYes(await ask('Add another account? [y/N] '), false)) {
+        try {
+          await addAccount(iron, ask, out, errLine);
+        } catch (e) {
+          report(e);
+        }
+      }
+    }
+
+    // 4. Summary.
+    out(`\n== ${yes ? 3 : 4}. Your accounts ==`);
+    await status(iron, io, false);
+    const first = (await iron.listProfiles())[0];
+    out(`\nYou're set. Try: iron-proxy chat ${first?.provider ?? 'anthropic'} "hello"`);
+    return 0;
+  } finally {
+    own?.close();
+  }
+}
+
+async function addAccount(
+  iron: IronProxy,
+  ask: Ask,
+  out: (s: string) => void,
+  errLine: (s: string) => void,
+): Promise<void> {
+  const adapters = iron.registry.list();
+  const provider = await choose(
+    ask,
+    out,
+    'Provider',
+    adapters.map((a) => ({ value: a.id, label: `${a.id.padEnd(17)} ${a.displayName}` })),
+  );
+  const offered = Object.keys(iron.registry.get(provider).lanes).filter(
+    (l): l is 'cli' | 'api-key' => l === 'cli' || l === 'api-key',
+  );
+  if (!offered.length)
+    throw new IronProxyError('UNSUPPORTED', `Provider "${provider}" has no lane setup can add.`);
+  const lane =
+    offered.length === 1
+      ? offered[0]!
+      : await choose(
+          ask,
+          out,
+          'Sign in with',
+          offered.map((l) => ({
+            value: l,
+            label:
+              l === 'cli'
+                ? 'cli      your subscription, through the vendor CLI'
+                : 'api-key  an API key',
+          })),
+        );
+  const taken = new Set((await iron.listProfiles()).map((p) => p.title));
+  const suggested = freeTitle(
+    `${PROVIDER_SHORT_NAMES[provider]} (${lane === 'cli' ? 'subscription' : 'API key'})`,
+    taken,
+  );
+  const title = (await ask(`Title [${suggested}]: `)).trim() || suggested;
+
+  if (lane === 'api-key') {
+    let baseUrl: string | undefined;
+    if (provider === 'openai-compatible') {
+      baseUrl = (await ask("Base URL (the server's /v1 URL): ")).trim();
+      if (!baseUrl) throw new IronProxyError('INVALID_REQUEST', 'No base URL given.');
+    }
+    const key = (await ask('API key (not shown): ', { secret: true })).trim();
+    if (!key)
+      throw new IronProxyError('INVALID_REQUEST', 'No API key given.', {
+        hint: 'Add it later: iron-proxy profiles add --lane api-key --api-key-stdin.',
+      });
+    const p = await iron.createProfile({
+      title,
+      provider,
+      lane,
+      apiKeySecret: key,
+      ...(baseUrl ? { apiKey: { secretRef: '', baseUrl } } : {}),
+    });
+    out(`  Added "${p.title}" (${p.provider}, API key stored in the vault).`);
+    return;
+  }
+
+  const p = await iron.createProfile({ title, provider, lane });
+  out(`  Added "${p.title}" (${p.provider}). Signing in...`);
+  const info = await iron.loginCommand(p.id);
+  if (info.requiresTerminal) {
+    await printTerminalLogin(iron, p.id, out);
+    return;
+  }
+  await headlessLogin(iron, p.id, out, errLine);
 }
 
 function fmtTime(iso: string): string {

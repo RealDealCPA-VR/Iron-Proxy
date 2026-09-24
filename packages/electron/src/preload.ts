@@ -12,12 +12,15 @@ export class IronBridgeError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly details: Record<string, unknown>;
+  /** What the user should do next, when the manager said. */
+  readonly hint: string | undefined;
   constructor(e: SerializedError) {
     super(e.message);
     this.name = e.name || 'IronProxyError';
     this.code = e.code;
     this.retryable = e.retryable;
     this.details = e.details ?? {};
+    this.hint = typeof e.hint === 'string' && e.hint ? e.hint : undefined;
   }
 }
 
@@ -47,6 +50,8 @@ const METHODS = [
   'unpark',
   'listModels',
   'doctor',
+  'discoverLogins',
+  'adoptLogin',
 ] as const;
 
 /** Build the IronClient implementation the preload exposes. Exported for tests. */

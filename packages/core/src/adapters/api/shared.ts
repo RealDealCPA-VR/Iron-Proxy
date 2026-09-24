@@ -6,10 +6,15 @@ import { LaneQuotaSignal, type AttemptContext } from '../types.js';
 
 export async function requireKey(ctx: AttemptContext): Promise<string> {
   const ref = ctx.profile.apiKey?.secretRef;
-  if (!ref) throw new AuthRequiredError(ctx.profile.id, 'Profile has no API key configured.');
+  const who = { title: ctx.profile.title, lane: ctx.profile.lane };
+  if (!ref) throw new AuthRequiredError(ctx.profile.id, 'Profile has no API key configured.', who);
   const key = await ctx.vault.get(ref);
   if (!key)
-    throw new AuthRequiredError(ctx.profile.id, 'API key missing from the vault. Enter it again.');
+    throw new AuthRequiredError(
+      ctx.profile.id,
+      'API key missing from the vault. Enter it again.',
+      who,
+    );
   return key;
 }
 

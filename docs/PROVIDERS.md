@@ -18,7 +18,7 @@ Quota wording seen from the CLI: "You've hit your usage limit … resets at 3pm"
 | Subscription | Codex CLI, isolated home via `CODEX_HOME`. Login `codex login` (browser) or `codex login --device-auth` (headless URL + code). Status `codex login status`. Turn `codex exec --json --skip-git-repo-check --ephemeral --color never -s read-only [-m model] -` with the prompt on stdin (system prompt prepended in a `<system>` block; Codex has no system-prompt flag). Parses `item.completed/agent_message`, `turn.completed.usage`, `error` / `turn.failed`. | Flags confirmed on codex-cli 0.154.0. JSONL event names from documented `--json` output; fixture-tested. Live turn: pending. |
 | API key      | Chat Completions, bearer auth. Reset durations from `x-ratelimit-reset-requests/tokens` ("6m0s"). `insufficient_quota` → billing.                                                                                                                                                                                                                                                                                                                                 | Fixture.                                                                                                                     |
 
-Note: `codex exec` is an agent. With `-s read-only` it cannot write, but it may still read files under the working directory, which Iron-Proxy sets to the profile's isolated home (empty apart from Codex's own state).
+Note: `codex exec` is an agent. With `-s read-only` it cannot write, but it may still read files under the working directory, which Iron-Proxy sets to the profile's isolated home (empty apart from Codex's own state). For an adopted login that directory is the user's own `~/.codex`, which also holds their Codex history and settings.
 
 ## Google
 
@@ -38,11 +38,26 @@ Note: `codex exec` is an agent. With `-s read-only` it cannot write, but it may 
 
 API-key lane only. Set `apiKey.baseUrl` (required). Works with OpenRouter, Groq, Together, Fireworks, Ollama (`http://127.0.0.1:11434/v1`, any key), LM Studio, vLLM, LiteLLM. Rate-limit detection uses the OpenAI header conventions where present and `retry-after` otherwise.
 
+## Existing logins
+
+`discoverLogins()` / `iron-proxy profiles discover` look for a vendor CLI already signed in at its default home, using each spec's `defaultHome(env)`:
+
+| CLI         | Default home                                   | Offered for adoption                                                                                                                                                                                                                                                                                      |
+| ----------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | `CLAUDE_CONFIG_DIR`, else `~/.claude`          | Yes                                                                                                                                                                                                                                                                                                       |
+| Codex CLI   | `CODEX_HOME`, else `~/.codex`                  | Yes                                                                                                                                                                                                                                                                                                       |
+| Grok CLI    | `GROK_HOME`, else `~/.grok`                    | Yes                                                                                                                                                                                                                                                                                                       |
+| Gemini CLI  | unverified (`defaultHome` returns `undefined`) | No. The Gemini CLI is not installed on the machine this was built on, so where it keeps its sign-in by default, and how `GEMINI_CLI_HOME` maps onto that layout (the home itself or a `.gemini` folder inside it), is unconfirmed. Adopting a guessed directory could point a profile at the wrong place. |
+
+`~` is `USERPROFILE` on Windows and `HOME` elsewhere (as `os.homedir()` resolves it). Status is whatever the CLI's own status command says for that home (`ok`, `unauthenticated`, or `unknown` when the binary is missing or the output is unrecognised). Iron-Proxy never reads the credential files there.
+
+`adoptLogin({ provider, home })` makes a profile that uses the directory in place (`cli.adopted: true`). Removing the profile never deletes it. **Logging out an adopted profile runs the vendor's own logout against that directory, which signs the user's everyday CLI out too**; the switcher asks first.
+
 ## Adding a provider
 
 - OpenAI-compatible API: `registry.register({ id: 'openai-compatible', … })` already covers it; create profiles with a `baseUrl`.
 - A new first-class API: implement `Lane` (two methods plus `checkAuth`), add a translator if the wire format is new, register an adapter. Look at `adapters/api/google.ts` (about 80 lines).
-- A new CLI: write a `CliSpec` (see `adapters/cli/specs.ts`), extend the fake CLI fixture with its flavour, and add it to the `describe.each` in `cli-lane.test.ts`. The lane, login capture, quota parsing and env isolation come for free.
+- A new CLI: write a `CliSpec` (see `adapters/cli/specs.ts`), extend the fake CLI fixture with its flavour, and add it to the `describe.each` in `cli-lane.test.ts`. The lane, login capture, quota parsing and env isolation come for free. Give it a `defaultHome(env)` once its default state directory is confirmed, and add its install command to `CLI_INSTALL_HINTS` so `CLI_NOT_FOUND` tells users how to get it.
 
 ## OAuth lane
 

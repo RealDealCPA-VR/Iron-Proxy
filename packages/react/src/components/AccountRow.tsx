@@ -21,7 +21,7 @@ export interface AccountRowProps {
   count: number;
 }
 
-type Detail = 'none' | 'login' | 'terminal' | 'apikey' | 'remove';
+type Detail = 'none' | 'login' | 'terminal' | 'apikey' | 'remove' | 'logout';
 
 export function AccountRow({ profile, index, count }: AccountRowProps) {
   const { labels, view, compact } = useSwitcher();
@@ -161,6 +161,11 @@ export function AccountRow({ profile, index, count }: AccountRowProps) {
         </div>
         <div className="iron-badges">
           <span className="iron-badge iron-badge--lane">{laneLabel}</span>
+          {profile.cli?.adopted ? (
+            <span className="iron-badge" data-testid={`adopted-${profile.id}`}>
+              {labels.existingLogin}
+            </span>
+          ) : null}
           {profile.defaultModel && !compact ? (
             <span className="iron-badge">{profile.defaultModel}</span>
           ) : null}
@@ -253,7 +258,10 @@ export function AccountRow({ profile, index, count }: AccountRowProps) {
                     () => void actions.unpark(profile.id),
                   )
                 : null}
-              {item('logout', <IconLogout />, labels.logOut, () => void actions.logout(profile.id))}
+              {item('logout', <IconLogout />, labels.logOut, () =>
+                // Logging out an adopted login signs the user's own CLI out too: ask first.
+                profile.cli?.adopted ? setDetail('logout') : void actions.logout(profile.id),
+              )}
               <li className="iron-menu-sep" role="separator" />
               {item('remove', <IconTrash />, labels.remove, () => setDetail('remove'), true)}
             </ul>
@@ -324,6 +332,30 @@ export function AccountRow({ profile, index, count }: AccountRowProps) {
             </button>
           </div>
         </form>
+      ) : null}
+      {detail === 'logout' ? (
+        <div className="iron-row-detail" role="alertdialog" aria-label={labels.logOut}>
+          <div>{labels.confirmLogoutAdopted}</div>
+          <div className="iron-panel-actions">
+            <button
+              type="button"
+              className="iron-btn iron-btn--sm"
+              onClick={() => setDetail('none')}
+            >
+              {labels.cancel}
+            </button>
+            <button
+              type="button"
+              className="iron-btn iron-btn--sm iron-btn--danger"
+              onClick={() => {
+                setDetail('none');
+                void actions.logout(profile.id);
+              }}
+            >
+              {labels.logOut}
+            </button>
+          </div>
+        </div>
       ) : null}
       {detail === 'remove' ? (
         <div className="iron-row-detail" role="alertdialog" aria-label={labels.confirmRemove}>

@@ -112,7 +112,7 @@ export class Router {
         if (signal) {
           lastSignal = signal;
           await this.park(profile, signal);
-          if (opts.strict) throw new QuotaExceededError(profile.id, signal);
+          if (opts.strict) throw new QuotaExceededError(profile.id, signal, provider);
           continue;
         }
         this.deps.emitter.emit({
@@ -215,9 +215,10 @@ export class Router {
                 {
                   retryable: true,
                   details: { profileId: profile.id, signal },
+                  hint: 'Resend; the next account will take it.',
                 },
               )
-            : new QuotaExceededError(profile.id, signal);
+            : new QuotaExceededError(profile.id, signal, provider);
           this.deps.emitter.emit({
             type: 'request.failed',
             requestId,
@@ -277,6 +278,36 @@ export class Router {
     return all.sort((a, b) => a.order - b.order);
   }
 
+  /**
+   * Whether a request would try this profile right now. Clears a park whose
+   * cooldown has passed first (the auto-return), exactly as every request does.
+   * Unauthenticated profiles are skipped unless the caller pinned one.
+   */
+  async availability(
+    profile: Profile,
+    opts: Pick<RunOptions, 'profileId'> = {},
+    now = this.clock.now(),
+  ): Promise<{ usable: boolean; state: ProfileState }> {
+    const st = await this.state(profile.id);
+    if (st.status === 'parked') {
+      if (st.parkedUntil && new Date(st.parkedUntil).getTime() <= now) {
+        st.status = 'ready';
+        delete st.parkedUntil;
+        delete st.parkedReason;
+        await this.deps.states.put(st);
+        this.deps.emitter.emit({ type: 'profile.unparked', profileId: profile.id });
+      } else return { usable: false, state: st };
+    }
+    if (st.status === 'unauthenticated' && !opts.profileId) return { usable: false, state: st };
+    try {
+      this.deps.registry.laneFor(profile);
+    } catch {
+      // provider has no such lane registered (e.g. oauth without an extension)
+      return { usable: false, state: st };
+    }
+    return { usable: true, state: st };
+  }
+
   private async nextAttempt(
     provider: ProviderId,
     opts: RunOptions,
@@ -287,24 +318,7 @@ export class Router {
     if (!candidates.length && !tried.length) throw new NoProfileError(provider);
     for (const profile of candidates) {
       if (tried.includes(profile.id)) continue;
-      const st = await this.state(profile.id);
-      if (st.status === 'parked') {
-        if (st.parkedUntil && new Date(st.parkedUntil).getTime() <= now) {
-          st.status = 'ready';
-          delete st.parkedUntil;
-          delete st.parkedReason;
-          await this.deps.states.put(st);
-          this.deps.emitter.emit({ type: 'profile.unparked', profileId: profile.id });
-        } else continue;
-      }
-      if (st.status === 'unauthenticated' && !opts.profileId) continue;
-      let lane;
-      try {
-        lane = this.deps.registry.laneFor(profile);
-      } catch {
-        continue; // provider has no such lane registered (e.g. oauth without an extension)
-      }
-      void lane;
+      if (!(await this.availability(profile, opts, now)).usable) continue;
       const controller = new AbortController();
       const timeout = setTimeout(
         () =>
@@ -349,8 +363,12 @@ export class Router {
       const until = states[id]?.parkedUntil;
       if (until && (!earliest || until < earliest)) earliest = until;
     }
-    if (last?.kind === 'auth-expired' && tried.length === 1)
-      return new AuthRequiredError(tried[0]!, last.message);
+    if (last?.kind === 'auth-expired' && tried.length === 1) {
+      const p = await this.deps.profiles.get(tried[0]!);
+      return new AuthRequiredError(tried[0]!, last.message, {
+        ...(p ? { title: p.title, lane: p.lane } : {}),
+      });
+    }
     this.deps.emitter.emit({
       type: 'provider.exhausted',
       provider,
@@ -378,6 +396,7 @@ export class Router {
       'Cannot infer the provider from the model name. Pass `provider` or a recognisable model.',
       {
         details: { model: req.model, configuredProviders: [...providers] },
+        hint: 'Pass the provider (x-iron-provider header, --provider, or RunOptions.provider) or a model name starting with claude, gpt, gemini or grok.',
       },
     );
   }

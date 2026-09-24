@@ -52,6 +52,11 @@ export interface CliSpec {
   parseModels?(stdout: string): string[];
   /** Files/dirs created inside a fresh home before first login, if the CLI needs any. */
   prepareHome?(home: string): Promise<void>;
+  /**
+   * Where the CLI keeps its state when no home variable points elsewhere, so an
+   * existing login there can be adopted. Undefined when the layout is unverified.
+   */
+  defaultHome?(env: NodeJS.ProcessEnv): string | undefined;
 }
 
 /** Flatten a unified conversation into a single prompt for an agent CLI. */
@@ -101,7 +106,12 @@ export class CliLane implements Lane {
 
   env(profile: Profile): Record<string, string> {
     if (!profile.cli?.home)
-      throw new CliError('CLI_FAILED', `Profile "${profile.title}" has no CLI home directory.`);
+      throw new CliError(
+        'CLI_FAILED',
+        `Profile "${profile.title}" has no CLI home directory.`,
+        {},
+        `Remove this profile and add it again (iron-proxy profiles remove ${profile.id}), so it gets a home directory.`,
+      );
     const env = baseEnv({ [this.spec.homeEnv]: profile.cli.home, ...(profile.cli.env ?? {}) });
     for (const k of this.spec.stripEnv) delete env[k];
     return env;
@@ -120,8 +130,42 @@ export class CliLane implements Lane {
     return { binary, args: [...lead, ...args], env: this.env(profile) };
   }
 
+  /**
+   * The command that starts the vendor CLI interactively as this profile, with
+   * `args` appended: the same scrubbed environment every lane spawn gets (home
+   * variable set, inherited API keys removed).
+   */
+  interactiveCommand(
+    profile: Profile,
+    args: string[] = [],
+  ): { binary: string; args: string[]; env: Record<string, string> } {
+    const { binary, lead } = this.exe(profile);
+    return { binary, args: [...lead, ...args], env: this.env(profile) };
+  }
+
+  /**
+   * What a user's own shell needs to act as this profile: the home variable and
+   * the profile's own `cli.env` entries to set, and the API-key variables to
+   * clear so the subscription is used. Never PATH, never a secret from the vault.
+   */
+  shellEnv(profile: Profile): { set: Record<string, string>; unset: string[] } {
+    const full = this.env(profile);
+    const set: Record<string, string> = { [this.spec.homeEnv]: full[this.spec.homeEnv]! };
+    for (const k of Object.keys(profile.cli?.env ?? {})) {
+      const v = full[k];
+      if (v !== undefined && !this.spec.stripEnv.includes(k) && !/^path$/i.test(k)) set[k] = v;
+    }
+    return { set, unset: [...this.spec.stripEnv] };
+  }
+
+  /** Where the profile's binary resolves on this machine, or undefined when it is not installed. */
+  async findBinary(profile?: Profile): Promise<string | undefined> {
+    return which(profile?.cli?.binary ?? this.spec.binary);
+  }
+
+  /** Create the isolated home. An adopted home belongs to the user and is never touched. */
   async ensureHome(profile: Profile): Promise<void> {
-    if (!profile.cli?.home) return;
+    if (!profile.cli?.home || profile.cli.adopted) return;
     await mkdir(profile.cli.home, { recursive: true });
     await this.spec.prepareHome?.(profile.cli.home);
   }
@@ -325,7 +369,12 @@ export class CliLane implements Lane {
       const exit = await proc.exit;
       if (controller.signal.aborted) {
         emit({ type: 'cancelled', profileId: profile.id });
-        throw new CliError('CLI_FAILED', 'Login cancelled.');
+        throw new CliError(
+          'CLI_FAILED',
+          'Login cancelled.',
+          {},
+          `Start the login again when you are ready: iron-proxy login ${profile.id}.`,
+        );
       }
       const status = await this.checkAuth(profile);
       if ((exit.code ?? 0) === 0 && status !== 'unauthenticated') {
@@ -334,7 +383,12 @@ export class CliLane implements Lane {
       }
       const message = `Login did not complete (exit ${exit.code}, status ${status}).`;
       emit({ type: 'failed', profileId: profile.id, message });
-      throw new CliError('CLI_FAILED', message, { code: exit.code, status });
+      throw new CliError(
+        'CLI_FAILED',
+        message,
+        { code: exit.code, status },
+        `Finish the sign-in in a terminal window: iron-proxy login ${profile.id} --terminal prints the exact command.`,
+      );
     })();
     done.catch(() => {});
 

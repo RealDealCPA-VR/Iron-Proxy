@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { IronEvent } from '@iron-proxy/core';
+import { IRON_CLIENT_METHODS, type IronEvent } from '@iron-proxy/core';
 import { createBridgeClient, exposeIronProxy, IronBridgeError } from '../src/preload.js';
 import type {
   ContextBridgeLike,
@@ -57,6 +57,37 @@ describe('preload bridge', () => {
     expect(err.code).toBe('PROFILE_NOT_FOUND');
     expect(err.details).toEqual({ profileId: 'x' });
     expect(err.message).toBe('nope');
+    expect(err.hint).toBeUndefined();
+  });
+
+  it('bridges every IronClient method, including discoverLogins and adoptLogin', async () => {
+    const calls: unknown[][] = [];
+    const { ipcRenderer } = fakeIpcRenderer((method, ...args) => {
+      calls.push([method, ...args]);
+      if (method === 'adoptLogin')
+        return {
+          __ironError: {
+            name: 'IronProxyError',
+            code: 'INVALID_REQUEST',
+            message: 'Profile "Mine" already uses "/h".',
+            retryable: false,
+            hint: 'Use the existing profile p1.',
+          },
+        };
+      return [];
+    });
+    const client = createBridgeClient(ipcRenderer) as unknown as Record<string, unknown>;
+    for (const m of IRON_CLIENT_METHODS) expect(typeof client[m], m).toBe('function');
+    const bridged = createBridgeClient(ipcRenderer);
+    expect(await bridged.discoverLogins()).toEqual([]);
+    const err = await bridged.adoptLogin({ provider: 'anthropic', home: '/h' }).catch((e) => e);
+    expect(err).toBeInstanceOf(IronBridgeError);
+    expect(err.code).toBe('INVALID_REQUEST');
+    expect(err.hint).toBe('Use the existing profile p1.');
+    expect(calls).toEqual([
+      ['discoverLogins'],
+      ['adoptLogin', { provider: 'anthropic', home: '/h' }],
+    ]);
   });
 
   it('subscribes once, delivers events, and unsubscribes when the last listener leaves', () => {

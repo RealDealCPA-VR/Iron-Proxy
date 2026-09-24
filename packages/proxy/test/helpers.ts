@@ -7,6 +7,7 @@ import {
   MemoryStateStore,
   MemoryVault,
   type IronProxy,
+  type IronProxyOptions,
 } from '@iron-proxy/core';
 import { createProxyServer, type ProxyServer } from '../src/index.js';
 
@@ -178,8 +179,14 @@ export interface Harness {
 }
 
 export async function harness(
-  opts: { cors?: boolean; requireAuthForModels?: boolean } = {},
+  opts: {
+    cors?: boolean;
+    requireAuthForModels?: boolean;
+    /** Extra manager options, e.g. a registry with fake vendor CLIs and an env. */
+    ironOpts?: Pick<IronProxyOptions, 'registry' | 'env'>;
+  } = {},
 ): Promise<Harness> {
+  const { ironOpts, ...proxyOpts } = opts;
   const upstream = fakeUpstream();
   const dir = await mkdtemp(join(tmpdir(), 'iron-proxy-test-'));
   const iron = createIronProxy({
@@ -189,8 +196,9 @@ export async function harness(
     vault: new MemoryVault(),
     fetch: upstream.fetch,
     policy: { overloadRetries: 0 },
+    ...(ironOpts ?? {}),
   });
-  const proxy = createProxyServer({ iron, port: 0, heartbeatMs: 200, ...opts });
+  const proxy = createProxyServer({ iron, port: 0, heartbeatMs: 200, ...proxyOpts });
   const { url, token } = await proxy.listen();
   return {
     iron,

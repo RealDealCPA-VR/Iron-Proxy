@@ -22,4 +22,6 @@ import { getIronClient } from '@iron-proxy/electron/renderer';
 const client = getIronClient(); // an IronClient, e.g. for <AccountSwitcher client={client} />
 ```
 
+The bridge carries every `IronClient` method (including `discoverLogins` and `adoptLogin`); failures are rethrown in the renderer as `IronBridgeError` with `.code`, `.details` and `.hint`.
+
 Electron is a peer dependency; the package's `.npmrc` sets `ELECTRON_SKIP_BINARY_DOWNLOAD=1` so installing it in CI never downloads the binary. Full docs in the repository's `docs/ADOPTING.md`.

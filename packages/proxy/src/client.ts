@@ -4,7 +4,9 @@
  * `ReadableStream`, no Node imports (types only from core).
  */
 import type {
+  AdoptLoginInput,
   CliProbe,
+  DiscoveredLogin,
   IronClient,
   IronEvent,
   LoginCommandInfo,
@@ -30,6 +32,8 @@ export class HttpIronClientError extends Error {
     readonly code: string,
     message: string,
     readonly details: Record<string, unknown> = {},
+    /** What the user should do next, from the proxy's `iron.hint`. */
+    readonly hint: string | undefined = undefined,
   ) {
     super(message);
     this.name = 'HttpIronClientError';
@@ -78,13 +82,14 @@ export class HttpIronClient implements IronClient {
     if (!res.ok) {
       const j = (json ?? {}) as {
         error?: { message?: string };
-        iron?: { code?: string; details?: Record<string, unknown> };
+        iron?: { code?: string; details?: Record<string, unknown>; hint?: string };
       };
       throw new HttpIronClientError(
         res.status,
         j.iron?.code ?? `HTTP_${res.status}`,
         j.error?.message ?? `HTTP ${res.status} from ${path}`,
         j.iron?.details ?? {},
+        typeof j.iron?.hint === 'string' && j.iron.hint ? j.iron.hint : undefined,
       );
     }
     return json as T;
@@ -162,6 +167,12 @@ export class HttpIronClient implements IronClient {
   }
   doctor(): Promise<CliProbe[]> {
     return this.call('GET', '/iron/doctor');
+  }
+  discoverLogins(): Promise<DiscoveredLogin[]> {
+    return this.call('GET', '/iron/discover');
+  }
+  adoptLogin(input: AdoptLoginInput): Promise<Profile> {
+    return this.call('POST', '/iron/adopt', input);
   }
 
   /** Subscribe to `/iron/events`. Reconnects with backoff until unsubscribed. */

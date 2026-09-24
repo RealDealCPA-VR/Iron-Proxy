@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { Usage } from '../../types.js';
 import type { CliParsed, CliSpec } from './lane.js';
 
@@ -35,6 +37,12 @@ function usageFrom(u: unknown): Usage | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+/** The user's home directory as the given environment sees it (os.homedir semantics). */
+export function userHomeFrom(env: NodeJS.ProcessEnv): string {
+  const fromEnv = process.platform === 'win32' ? env.USERPROFILE : env.HOME;
+  return fromEnv || homedir();
+}
+
 const COMMON_STRIP = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -55,6 +63,7 @@ export const claudeSpec: CliSpec = {
   binary: 'claude',
   homeEnv: 'CLAUDE_CONFIG_DIR',
   stripEnv: COMMON_STRIP,
+  defaultHome: (env) => env.CLAUDE_CONFIG_DIR || join(userHomeFrom(env), '.claude'),
   run({ prompt, system, model }) {
     const args = [
       '-p',
@@ -146,6 +155,7 @@ export const codexSpec: CliSpec = {
   binary: 'codex',
   homeEnv: 'CODEX_HOME',
   stripEnv: COMMON_STRIP,
+  defaultHome: (env) => env.CODEX_HOME || join(userHomeFrom(env), '.codex'),
   run({ prompt, system, model }) {
     const args = [
       'exec',
@@ -212,6 +222,7 @@ export const grokSpec: CliSpec = {
   binary: 'grok',
   homeEnv: 'GROK_HOME',
   stripEnv: COMMON_STRIP,
+  defaultHome: (env) => env.GROK_HOME || join(userHomeFrom(env), '.grok'),
   run({ prompt, system, model }) {
     const args = [
       '-p',
@@ -295,6 +306,10 @@ export const geminiSpec: CliSpec = {
   binary: 'gemini',
   homeEnv: 'GEMINI_CLI_HOME',
   stripEnv: COMMON_STRIP,
+  // Unverified: where Gemini CLI keeps its sign-in by default (and how GEMINI_CLI_HOME
+  // maps onto it) is not confirmed, so an existing Gemini login is not offered for
+  // adoption. See docs/PROVIDERS.md.
+  defaultHome: () => undefined,
   run({ prompt, system, model }) {
     const args = [
       '-p',

@@ -52,6 +52,12 @@ export interface Labels {
   addBaseUrlHelp: string;
   create: string;
   back: string;
+  // existing logins
+  foundOnComputer: string;
+  foundOnComputerHelp: string;
+  useExistingLogin: string;
+  existingLogin: string;
+  confirmLogoutAdopted: string;
   // login panel
   loginWaiting: string;
   loginOpenUrl: string;
@@ -120,6 +126,12 @@ export const defaultLabels: Labels = {
   addBaseUrlHelp: 'The /v1 endpoint of an OpenAI-compatible server.',
   create: 'Create',
   back: 'Back',
+  foundOnComputer: 'Found on this computer',
+  foundOnComputerHelp: 'Already signed in with the official CLI. Use it as-is: no second login.',
+  useExistingLogin: 'Use this account',
+  existingLogin: 'Existing login',
+  confirmLogoutAdopted:
+    'This is your existing CLI login. Logging out here signs that CLI out on this computer too.',
   loginWaiting: 'Waiting for the sign-in to finish…',
   loginOpenUrl: 'Open this link to sign in',
   loginCode: 'Enter this code',

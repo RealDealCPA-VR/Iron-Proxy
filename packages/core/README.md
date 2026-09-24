@@ -20,4 +20,8 @@ const res = await iron.complete({
 });
 ```
 
+Already signed in to a vendor CLI? `iron.discoverLogins()` lists existing logins at the CLIs' default homes (checked with their own status commands, credential files never read), and `iron.adoptLogin({ provider, home })` turns one into a profile in place. Every `IronProxyError` has a `hint` telling the user what to do next.
+
+`iron.pickProfile(provider, { profileId?, lane? })` returns the account a request would use first right now (enabled, cli lane by default, not parked, signed in, lowest order), clearing expired parks exactly as the router does; `iron.interactiveCommand(id, args)` and `iron.shellEnv(id)` give the command and variables that start that account's vendor CLI from the user's own terminal (what `iron-proxy run` and `iron-proxy env` use).
+
 Full documentation, the failover contract and the provider matrix live in the repository's `docs/` folder.

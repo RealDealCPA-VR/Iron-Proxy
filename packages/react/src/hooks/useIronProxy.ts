@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AdoptLoginInput,
+  DiscoveredLogin,
   IronClient,
   IronEvent,
   LoginCommandInfo,
@@ -42,6 +44,12 @@ export interface IronActions {
   refresh(id?: string): Promise<void>;
   unpark(id: string): Promise<void>;
   listModels(id: string): Promise<string[]>;
+  /**
+   * Vendor CLIs already signed in on this computer. Best effort: empty on failure
+   * (for example an older host without the method), and no error banner.
+   */
+  discoverLogins(): Promise<DiscoveredLogin[]>;
+  adoptLogin(input: AdoptLoginInput): Promise<Profile | undefined>;
   clearError(): void;
   dismissExhausted(provider: ProviderId): void;
 }
@@ -317,6 +325,14 @@ export function useIronProxy(client: IronClient, opts: UseIronProxyOptions = {})
       },
       unpark: async (id) => void (await guard(() => client.unpark(id))),
       listModels: async (id) => (await guard(() => client.listModels(id))) ?? [],
+      discoverLogins: async () => {
+        try {
+          return await client.discoverLogins();
+        } catch {
+          return [];
+        }
+      },
+      adoptLogin: (input) => guard(() => client.adoptLogin(input)),
       clearError: () => setError(undefined),
       dismissExhausted: (provider) =>
         setExhausted((e) => {

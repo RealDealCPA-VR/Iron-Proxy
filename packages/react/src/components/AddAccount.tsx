@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import type { LaneKind, Profile, ProviderId } from '@iron-proxy/core';
+import { useEffect, useState } from 'react';
+import type { DiscoveredLogin, LaneKind, Profile, ProviderId } from '@iron-proxy/core';
 import { useSwitcher } from './context.js';
 import { LoginPanel } from './LoginPanel.jsx';
 import { IconClose } from './icons.jsx';
@@ -26,8 +26,40 @@ export function AddAccount({ onClose, providers }: AddAccountProps) {
   const [baseUrl, setBaseUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<Profile | undefined>();
+  const [found, setFound] = useState<DiscoveredLogin[]>([]);
+  const [adopting, setAdopting] = useState<string | undefined>();
+
+  const { discoverLogins } = view.actions;
+  useEffect(() => {
+    let alive = true;
+    void discoverLogins().then((list) => {
+      if (alive) setFound(list);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [discoverLogins]);
 
   const available = view.providers.filter((p) => !providers || providers.includes(p.id));
+  // Signed in, not yet a profile, and a provider this switcher offers.
+  const adoptable = found.filter(
+    (f) =>
+      f.status === 'ok' &&
+      !f.adoptedProfileId &&
+      available.some((p) => p.id === f.provider) &&
+      !view.profiles.some((p) => p.cli?.home === f.home),
+  );
+
+  const adopt = async (f: DiscoveredLogin) => {
+    setAdopting(f.home);
+    const p = await view.actions.adoptLogin({
+      provider: f.provider,
+      home: f.home,
+      title: f.suggestedTitle,
+    });
+    setAdopting(undefined);
+    if (p) onClose();
+  };
   const info = available.find((p) => p.id === provider);
   const lanes = LANE_ORDER.filter((l) => info?.lanes.includes(l));
 
@@ -123,6 +155,33 @@ export function AddAccount({ onClose, providers }: AddAccountProps) {
               {stepLabel(s)}
             </span>
           ))}
+        </div>
+      ) : null}
+
+      {step === 'provider' && adoptable.length ? (
+        <div className="iron-found" role="group" aria-label={labels.foundOnComputer}>
+          <h4 className="iron-found-title">{labels.foundOnComputer}</h4>
+          <div className="iron-help" style={{ marginBottom: 6 }}>
+            {labels.foundOnComputerHelp}
+          </div>
+          <ul className="iron-found-list">
+            {adoptable.map((f) => (
+              <li key={f.home} className="iron-found-item" data-testid={`found-${f.provider}`}>
+                <div>
+                  <strong>{providerName(f.provider)}</strong>
+                  <small title={f.home}>{f.home}</small>
+                </div>
+                <button
+                  type="button"
+                  className="iron-btn iron-btn--sm iron-btn--primary"
+                  disabled={adopting !== undefined}
+                  onClick={() => void adopt(f)}
+                >
+                  {labels.useExistingLogin}
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
 

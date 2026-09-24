@@ -162,15 +162,18 @@ export interface ClientError {
   message: string;
   code?: string;
   retryable?: boolean;
+  /** What the user should do next, when the library said. */
+  hint?: string;
 }
 
 export function toClientError(err: unknown): ClientError {
   if (err && typeof err === 'object') {
-    const e = err as { message?: unknown; code?: unknown; retryable?: unknown };
+    const e = err as { message?: unknown; code?: unknown; retryable?: unknown; hint?: unknown };
     return {
       message: typeof e.message === 'string' ? e.message : String(err),
       ...(typeof e.code === 'string' ? { code: e.code } : {}),
       ...(typeof e.retryable === 'boolean' ? { retryable: e.retryable } : {}),
+      ...(typeof e.hint === 'string' && e.hint ? { hint: e.hint } : {}),
     };
   }
   return { message: String(err) };

@@ -1,5 +1,7 @@
 import type {
+  AdoptLoginInput,
   CliProbe,
+  DiscoveredLogin,
   IronClient,
   IronEvent,
   LoginCommandInfo,
@@ -21,6 +23,8 @@ export class FakeIronClient implements IronClient {
   private seq = 0;
   /** Resolvers for pending logins, keyed by profile id. */
   pendingLogins = new Map<string, { resolve(): void; reject(e: Error): void }>();
+  /** What discoverLogins reports (existing CLI logins on "this computer"). */
+  discovered: DiscoveredLogin[] = [];
 
   emit(e: IronEvent): void {
     for (const l of this.listeners) l(e);
@@ -210,6 +214,33 @@ export class FakeIronClient implements IronClient {
   }
   async doctor(): Promise<CliProbe[]> {
     return [];
+  }
+  async discoverLogins(): Promise<DiscoveredLogin[]> {
+    this.calls.push('discoverLogins');
+    return this.discovered.map((d) => {
+      const owner = [...this.profiles.values()].find((p) => p.cli?.home === d.home);
+      return owner ? { ...d, adoptedProfileId: owner.id } : { ...d };
+    });
+  }
+  async adoptLogin(input: AdoptLoginInput): Promise<Profile> {
+    this.calls.push(`adoptLogin:${input.provider}:${input.home}:${input.title ?? ''}`);
+    if ([...this.profiles.values()].some((p) => p.cli?.home === input.home))
+      throw Object.assign(new Error(`A profile already uses "${input.home}".`), {
+        code: 'INVALID_REQUEST',
+        hint: 'Use the existing profile.',
+      });
+    const p = this.seed(
+      {
+        title: input.title ?? 'Existing login',
+        provider: input.provider,
+        lane: 'cli',
+        cli: { home: input.home, adopted: true },
+      },
+      { status: 'ready' },
+    );
+    this.emit({ type: 'profile.created', profile: p });
+    this.emit({ type: 'profile.state', state: this.stateMap.get(p.id)! });
+    return p;
   }
   onEvent(listener: (e: IronEvent) => void): () => void {
     this.listeners.add(listener);

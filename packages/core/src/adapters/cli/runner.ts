@@ -222,9 +222,14 @@ export async function which(binary: string): Promise<string | undefined> {
     }
   }
   const dirs = (process.env.PATH ?? process.env.Path ?? '').split(delimiter).filter(Boolean);
+  // On Windows a bare name ("claude") is tried with each PATHEXT extension only:
+  // npm installs an extensionless sh script next to claude.cmd, and that script
+  // cannot be started on Windows. A name that already has an extension is taken as-is.
   const exts =
     process.platform === 'win32'
-      ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+      ? /\.[^\\/.]+$/.test(binary)
+        ? ['']
+        : (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
       : [''];
   for (const dir of dirs) {
     for (const ext of exts) {

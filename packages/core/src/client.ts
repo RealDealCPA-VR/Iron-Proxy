@@ -1,6 +1,8 @@
 import type { IronProxy } from './manager.js';
 import type {
+  AdoptLoginInput,
   CliProbe,
+  DiscoveredLogin,
   IronEvent,
   LaneKind,
   Profile,
@@ -49,6 +51,10 @@ export interface IronClient {
   unpark(id: string): Promise<void>;
   listModels(id: string): Promise<string[]>;
   doctor(): Promise<CliProbe[]>;
+  /** Vendor CLIs already signed in at their default home on this machine. */
+  discoverLogins(): Promise<DiscoveredLogin[]>;
+  /** Make a profile that uses an existing CLI login in place. No second login, nothing copied. */
+  adoptLogin(input: AdoptLoginInput): Promise<Profile>;
   onEvent(listener: (event: IronEvent) => void): () => void;
 }
 
@@ -119,6 +125,12 @@ export class LocalIronClient implements IronClient {
   doctor() {
     return this.iron.doctor();
   }
+  discoverLogins() {
+    return this.iron.discoverLogins();
+  }
+  adoptLogin(input: AdoptLoginInput) {
+    return this.iron.adoptLogin(input);
+  }
   onEvent(listener: (event: IronEvent) => void): () => void {
     return this.iron.events.onAny(listener);
   }
@@ -143,6 +155,8 @@ export const IRON_CLIENT_METHODS = [
   'unpark',
   'listModels',
   'doctor',
+  'discoverLogins',
+  'adoptLogin',
 ] as const satisfies ReadonlyArray<Exclude<keyof IronClient, 'onEvent'>>;
 
 export type IronClientMethod = (typeof IRON_CLIENT_METHODS)[number];

@@ -248,6 +248,54 @@
   flex: 1;
   min-width: 0;
 }
+.iron-banner-hint {
+  margin-top: 4px;
+  color: var(--iron-fg-muted);
+  font-size: 12.5px;
+}
+.iron-found {
+  margin-bottom: 12px;
+}
+.iron-found-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--iron-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.iron-found-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.iron-found-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--iron-border);
+  border-radius: var(--iron-radius-sm);
+  background: var(--iron-bg);
+  min-width: 0;
+}
+.iron-found-item > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.iron-found-item small {
+  color: var(--iron-fg-muted);
+  font-family: var(--iron-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .iron-banner-code {
   color: var(--iron-fg-muted);
   font-family: var(--iron-mono);

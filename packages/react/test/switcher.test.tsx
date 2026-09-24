@@ -151,6 +151,97 @@ describe('AccountSwitcher', () => {
     await screen.findByText('Off');
   });
 
+  it('offers an existing CLI login and adopts it in one click', async () => {
+    const { client } = setup((c) => {
+      c.discovered = [
+        {
+          provider: 'anthropic',
+          binary: 'claude',
+          home: '/u/.claude',
+          installed: true,
+          status: 'ok',
+          suggestedTitle: 'Claude (existing login)',
+        },
+        {
+          provider: 'openai',
+          binary: 'codex',
+          home: '/u/.codex',
+          installed: true,
+          status: 'unauthenticated',
+          suggestedTitle: 'Codex (existing login)',
+        },
+      ];
+    });
+    fireEvent.click(await screen.findByText('Add account'));
+    const found = await screen.findByRole('group', { name: 'Found on this computer' });
+    // Only signed-in, not-yet-adopted logins are offered.
+    expect(within(found).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(found).getByText('/u/.claude')).toBeTruthy();
+    fireEvent.click(within(found).getByText('Use this account'));
+    await waitFor(() =>
+      expect(client.calls).toContain('adoptLogin:anthropic:/u/.claude:Claude (existing login)'),
+    );
+    await waitFor(() => expect(screen.queryByTestId('add-account')).toBeNull());
+    const row = await screen.findByText('Claude (existing login)');
+    const id = row.closest('[data-profile-id]')!.getAttribute('data-profile-id')!;
+    expect(within(screen.getByTestId(`row-${id}`)).getByText('Existing login')).toBeTruthy();
+
+    // Opening the panel again no longer offers the adopted login.
+    fireEvent.click(screen.getByText('Add account'));
+    await screen.findByTestId('add-account');
+    await waitFor(() => expect(client.calls.filter((c) => c === 'discoverLogins')).toHaveLength(2));
+    expect(screen.queryByRole('group', { name: 'Found on this computer' })).toBeNull();
+  });
+
+  it('asks before logging out an adopted login, and not for others', async () => {
+    const { client } = setup((c) => {
+      c.seed({
+        id: 'x',
+        title: 'Mine',
+        provider: 'anthropic',
+        lane: 'cli',
+        cli: { home: '/u/.claude', adopted: true },
+      });
+      c.seed({
+        id: 'y',
+        title: 'Isolated',
+        provider: 'anthropic',
+        lane: 'cli',
+        cli: { home: '/h' },
+      });
+    });
+    await screen.findByText('Mine');
+    expect(screen.queryByTestId('adopted-y')).toBeNull();
+    fireEvent.click(screen.getByLabelText('More actions: Mine'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Log out' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Log out' });
+    expect(confirm.textContent).toContain('signs that CLI out on this computer too');
+    expect(client.calls).not.toContain('logout:x');
+    fireEvent.click(within(confirm).getByText('Log out'));
+    await waitFor(() => expect(client.calls).toContain('logout:x'));
+
+    fireEvent.click(screen.getByLabelText('More actions: Isolated'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Log out' }));
+    await waitFor(() => expect(client.calls).toContain('logout:y'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('renders the hint under the error message', async () => {
+    const client = new FakeIronClient();
+    client.listProfiles = async () => {
+      throw Object.assign(new Error('Every anthropic account is parked.'), {
+        code: 'ALL_PROFILES_EXHAUSTED',
+        hint: 'Wait until 3:40 PM for the first reset, or add another anthropic account.',
+      });
+    };
+    render(<AccountSwitcher client={client} injectStyles={false} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Every anthropic account is parked.');
+    expect(within(alert).getByTestId('error-hint').textContent).toBe(
+      'Wait until 3:40 PM for the first reset, or add another anthropic account.',
+    );
+  });
+
   it('renders client errors inline', async () => {
     const client = new FakeIronClient();
     client.listProfiles = async () => {
@@ -160,5 +251,6 @@ describe('AccountSwitcher', () => {
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('bridge missing');
     expect(alert.textContent).toContain('INVALID_REQUEST');
+    expect(screen.queryByTestId('error-hint')).toBeNull();
   });
 });

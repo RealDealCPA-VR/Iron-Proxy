@@ -94,7 +94,10 @@ export class FileVault implements Vault {
         throw new IronProxyError(
           'VAULT_ERROR',
           `Cannot read vault key: ${(err as Error).message}`,
-          { cause: err },
+          {
+            cause: err,
+            hint: 'Check that the Iron-Proxy data directory is readable by this OS user, then retry.',
+          },
         );
       }
     }
@@ -103,6 +106,9 @@ export class FileVault implements Vault {
         throw new IronProxyError(
           'VAULT_ERROR',
           `Vault key was protected with "${file.protector}" but this process uses "${this.protector.label}".`,
+          {
+            hint: `Wrong key protector: start Iron-Proxy with the "${file.protector}" protector it was set up with (same app, same OS user), or re-enter the API keys in a fresh data directory.`,
+          },
         );
       }
       this.key = await this.protector.unprotect(Buffer.from(file.key, 'base64'));
@@ -170,7 +176,10 @@ export class FileVault implements Vault {
         throw new IronProxyError(
           'VAULT_ERROR',
           `Cannot decrypt secret "${ref}". Key file changed?`,
-          { cause: err },
+          {
+            cause: err,
+            hint: "The vault key changed since this secret was saved: re-enter the API key ('Set API key' in the switcher).",
+          },
         );
       }
     });

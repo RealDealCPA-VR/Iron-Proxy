@@ -1,7 +1,13 @@
 export * from './types.js';
 export * from './errors.js';
 export { TypedEmitter, type IronEmitter, type Listener } from './events.js';
-export { IronProxy, createIronProxy, defaultDataDir, type IronProxyOptions } from './manager.js';
+export {
+  IronProxy,
+  createIronProxy,
+  defaultDataDir,
+  PROVIDER_SHORT_NAMES,
+  type IronProxyOptions,
+} from './manager.js';
 export { Router, type RouterDeps } from './router/router.js';
 export { FileProfileStore, MemoryProfileStore, type ProfileStore } from './store/profile-store.js';
 export { FileStateStore, MemoryStateStore, type StateStore } from './store/state-store.js';
@@ -48,7 +54,14 @@ export {
   type CliRunInput,
   type CliSpec,
 } from './adapters/cli/lane.js';
-export { claudeSpec, codexSpec, geminiSpec, grokSpec, CLI_SPECS } from './adapters/cli/specs.js';
+export {
+  claudeSpec,
+  codexSpec,
+  geminiSpec,
+  grokSpec,
+  CLI_SPECS,
+  userHomeFrom,
+} from './adapters/cli/specs.js';
 export {
   baseEnv,
   run,

@@ -12,4 +12,6 @@ import { AccountSwitcher } from '@iron-proxy/react';
 
 Props: `providers` (restrict), `compact`, `onServed(profileId)`, `onOpenTerminal(cmd)` (Electron hosts), `labels` (override any string), `theme: 'light' | 'dark'`, `injectStyles` (default true; set false and import `@iron-proxy/react/styles.css` yourself), `className`. Every colour and spacing is a CSS custom property on `.iron-switcher`.
 
+**Add account** first lists vendor CLIs already signed in on this computer under "Found on this computer", each with a one-click "Use this account" (no second login); adopted accounts carry an "Existing login" badge, and logging one out asks first because it signs that CLI out too. Error banners show the library's `hint` under the message.
+
 Hooks for custom UIs: `useIronProxy(client)` returns profiles, states, login progress, exhausted providers and every action; `useCountdown(iso)` ticks only while something is parked.

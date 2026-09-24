@@ -70,12 +70,20 @@ A `CliSpec` is a small object: binary name, the env var for the home dir, the ar
   proxy.json         written by `iron-proxy serve`: {url, token, pid}
 ```
 
+An **adopted** profile (`cli.adopted: true`, from `adoptLogin`) points at a directory outside `cli-homes`: the vendor CLI's own default home, such as `~/.claude`. Iron-Proxy runs the CLI there exactly as it runs it in an isolated home, but never prepares, recreates or deletes that directory, and logging it out signs the user's own CLI out. `discoverLogins()` finds candidates through each spec's `defaultHome(env)` and the CLI's own status command.
+
+`pickProfile(provider)` answers "which account would a request use right now" without running one: it walks `Router.candidates()` through `Router.availability()`, the same check each request makes (expired parks cleared, parked and signed-out accounts skipped). `iron-proxy run` starts the vendor CLI interactively as that account with `CliLane.interactiveCommand()` (the lane's scrubbed environment), and `iron-proxy env` prints `CliLane.shellEnv()`; neither reads anything out of the home.
+
 Default `dataDir` is `~/.iron-proxy` (or `IRON_PROXY_DATA_DIR`). Electron hosts get `<userData>/iron-proxy`. Two apps that want to _share_ accounts point at the same `dataDir`; two that want isolation do not.
+
+## Errors and hints
+
+Every failure is an `IronProxyError` with a stable `code`, `retryable`, `details` and a `hint`: one imperative sentence telling the user what to do next. `DEFAULT_HINTS` covers every code; raisers that know more (the provider, the profile title, the missing binary's install command, the local reset time) pass their own. Hints pass through `sanitizeHint` (secret redaction plus email scrubbing) in the constructor, so nothing a caller puts in one can leak a key or an address. `toJSON()` / `serializeError()` carry the hint to events, the proxy's `iron` error object, the Electron bridge and the React banner.
 
 ## Extension points
 
 - **New provider**: register a `ProviderAdapter` with `registry.register(...)`. An OpenAI-compatible API needs only a base URL.
-- **New CLI**: write a `CliSpec` and wrap it in `new CliLane(spec)`. About sixty lines.
+- **New CLI**: write a `CliSpec` and wrap it in `new CliLane(spec)`. About sixty lines. Add `defaultHome(env)` only once the CLI's default state directory is verified, so its existing logins can be adopted.
 - **OAuth lane**: implement `Lane` with `kind: 'oauth'`, call `registry.addLane(provider, lane)`, create profiles with `lane: 'oauth', oauth: { extension: '<your name>' }`.
 - **Storage**: implement `ProfileStore`, `StateStore` or `Vault`. Memory versions ship for tests.
 - **Key protection**: implement `KeyProtector` (two functions). The Electron package ships the `safeStorage` one.

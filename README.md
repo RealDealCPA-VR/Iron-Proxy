@@ -41,6 +41,12 @@ Step-by-step for each: [docs/ADOPTING.md](docs/ADOPTING.md).
 ## Sixty seconds
 
 ```bash
+npx iron-proxy setup                                               # guided: checks the CLIs, adopts logins, adds accounts
+```
+
+Or step by step:
+
+```bash
 npx iron-proxy doctor                                              # which vendor CLIs are installed
 npx iron-proxy profiles add --provider anthropic --lane cli --title "Work Claude Max"
 npx iron-proxy login <id>                                          # prints the sign-in link and code
@@ -49,6 +55,30 @@ npx iron-proxy login <id>
 npx iron-proxy chat anthropic "Hello from two accounts"            # streams; says which one served
 npx iron-proxy serve --port 8791                                   # now every SDK can use them
 ```
+
+Already signed in to Claude Code, Codex or Grok on this computer? Skip the second login:
+
+```bash
+npx iron-proxy profiles discover                                   # existing CLI logins, signed in or not
+npx iron-proxy profiles adopt anthropic                            # use ~/.claude as-is, as an account
+```
+
+An adopted login stays exactly where it is: nothing is copied, Iron-Proxy never deletes that directory, and the switcher shows it under **Found on this computer** with a one-click **Use this account**. When something does go wrong, every error carries a one-line `hint` saying what to do next (the CLI prints it, the proxy returns it, the switcher shows it).
+
+## Use your accounts in your own terminal
+
+The same accounts work when you type `claude`, `codex`, `grok` or `gemini` yourself:
+
+```bash
+npx iron-proxy run anthropic                     # starts Claude Code as the account that is ready right now
+npx iron-proxy run openai -- --model gpt-5       # anything after -- goes to the vendor CLI
+eval "$(npx iron-proxy env anthropic)"           # bash/zsh: this shell now runs claude as that account
+npx iron-proxy env anthropic | Out-String | Invoke-Expression  # PowerShell (--shell cmd prints set "..." lines)
+```
+
+`run` picks the account a request would use first (enabled, not parked, signed in, lowest order), prints `Using "<title>" (<provider>)`, and starts the vendor CLI with its home variable set and every `*_API_KEY` removed, so the subscription pays, not a stray key. `env` prints only the home variable (plus the profile's own `cli.env` entries) and lines that clear the API-key variables; never `PATH`, never a secret.
+
+An interactive session **cannot switch accounts mid-session**: it stays on the account it started with. When that account hits its limit, quit and `iron-proxy run` again; the next ready account takes over.
 
 Or in code:
 

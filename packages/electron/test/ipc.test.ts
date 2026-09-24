@@ -81,6 +81,8 @@ describe('installIronProxy', () => {
       profiles: new MemoryProfileStore(),
       states: new MemoryStateStore(),
       vault: new MemoryVault(),
+      // No vendor CLI homes under this fake user, so discovery never touches the real ~.
+      env: { HOME: dir, USERPROFILE: dir },
     });
     const { ipcMain, invoke, handlers, listeners } = fakeIpcMain();
     const install = installIronProxy({ ipcMain, iron });
@@ -114,6 +116,21 @@ describe('installIronProxy', () => {
     expect(
       (notFound as { __ironError: { code: string; message: string } }).__ironError,
     ).toMatchObject({ code: 'PROFILE_NOT_FOUND' });
+    expect((notFound as { __ironError: { hint?: string } }).__ironError.hint).toMatch(
+      /iron-proxy profiles list/,
+    );
+
+    // The two existing-login methods ride the same whitelist (IRON_CLIENT_METHODS).
+    expect(await invoke('iron-proxy:call', sender, 'discoverLogins')).toEqual([]);
+    const noHome = await invoke('iron-proxy:call', sender, 'adoptLogin', {
+      provider: 'anthropic',
+      home: join(dir, 'missing'),
+    });
+    expect(isIronIpcError(noHome)).toBe(true);
+    expect((noHome as { __ironError: { code: string; hint?: string } }).__ironError).toMatchObject({
+      code: 'INVALID_REQUEST',
+      hint: expect.stringContaining('--home'),
+    });
 
     install.dispose();
     expect(handlers.has('iron-proxy:call')).toBe(false);
