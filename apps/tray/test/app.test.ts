@@ -590,6 +590,15 @@ describe('tray app wiring', () => {
     await h.dispatch({ type: 'open-window' });
     expect(win.reloads).toBe(1);
 
+    // Let the tray catch up with everything the CLI wrote (its last state.json
+    // flush can land after the rebuild above read the file), and consume that
+    // reload, so what follows measures only the tray's own writes.
+    changed!('state.json');
+    await h.refresh();
+    await h.dispatch({ type: 'open-window' });
+    const baseline = win.reloads;
+    expect(baseline).toBeGreaterThanOrEqual(1);
+
     // The tray's own writes fire the watcher too, but are not another process's
     // changes: the hidden window is not reloaded for them.
     win.close();
@@ -606,7 +615,7 @@ describe('tray app wiring', () => {
     await h.refresh();
     expect(findItem(h.menu(), `account-${own.id}`)).toBeDefined();
     await h.dispatch({ type: 'open-window' });
-    expect(win.reloads).toBe(1);
+    expect(win.reloads).toBe(baseline);
     // A park the CLI records afterwards is another process's change again.
     win.close();
     const cli2 = createIronProxy({ dataDir: dir });
@@ -617,7 +626,7 @@ describe('tray app wiring', () => {
     await h.refresh();
     expect(findItem(h.menu(), `account-${added.id}`)?.label).toMatch(/parked/);
     await h.dispatch({ type: 'open-window' });
-    expect(win.reloads).toBe(2);
+    expect(win.reloads).toBe(baseline + 1);
 
     // And the tray's own changes keep what the CLI wrote.
     const mine = await h.iron.createProfile({
