@@ -1,6 +1,6 @@
 {
   "name": "@iron-proxy/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Account switching engine for AI providers: titled profiles, ordered same-provider failover on quota signals, automatic return. Zero runtime dependencies.",
   "license": "MIT",
   "type": "module",
