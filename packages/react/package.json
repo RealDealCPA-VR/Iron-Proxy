@@ -1,6 +1,6 @@
 {
   "name": "@iron-proxy/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Styled drop-in account switcher and hooks for Iron-Proxy: titled accounts per AI provider, ordered failover, parked countdowns, click-and-continue login.",
   "license": "MIT",
   "type": "module",
