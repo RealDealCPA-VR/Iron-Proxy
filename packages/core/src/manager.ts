@@ -134,6 +134,7 @@ export class IronProxy {
   private readonly clock: Clock;
   private readonly env: NodeJS.ProcessEnv;
   private readonly logins = new Map<string, LoginSession>();
+  private readonly background = new Set<Promise<void>>();
   /** Usage-history writes in flight, awaited by close() before the flush. */
   private readonly usageWrites = new Set<Promise<void>>();
   private readonly usageOff: Array<() => void> = [];
@@ -306,7 +307,7 @@ export class IronProxy {
     await this.profiles.put(profile);
     await this.states.put({ profileId: id, status: 'unknown', served: 0 });
     this.events.emit({ type: 'profile.created', profile });
-    if (refresh) void this.refreshStatus(id).catch(() => {});
+    if (refresh) this.inBackground(this.refreshStatus(id));
     return profile;
   }
 
@@ -354,7 +355,7 @@ export class IronProxy {
       st.status = patch.enabled ? 'unknown' : 'disabled';
       await this.states.put(st);
       this.events.emit({ type: 'profile.state', state: st });
-      if (patch.enabled) void this.refreshStatus(id).catch(() => {});
+      if (patch.enabled) this.inBackground(this.refreshStatus(id));
     }
     return p;
   }
@@ -619,20 +620,26 @@ export class IronProxy {
     const out: ProfileState[] = [];
     await Promise.all(
       targets.map(async (p) => {
-        const st = await this.router.state(p.id);
+        let st = await this.router.state(p.id);
         if (!p.enabled) {
           st.status = 'disabled';
         } else if (st.status !== 'parked' && st.status !== 'active') {
           const lane = this.registry.laneFor(p);
           const result = await lane.checkAuth(p, this.vault).catch(() => 'unknown' as const);
-          st.status =
-            result === 'unauthenticated'
-              ? 'unauthenticated'
-              : result === 'ok'
-                ? 'ready'
-                : st.status === 'unknown'
+          // The check can take seconds (it runs the vendor CLI). Re-read the state:
+          // a park or a served request may have landed meanwhile, and writing back
+          // the copy read before the check would silently undo it.
+          st = await this.router.state(p.id);
+          if (st.status !== 'parked' && st.status !== 'active') {
+            st.status =
+              result === 'unauthenticated'
+                ? 'unauthenticated'
+                : result === 'ok'
                   ? 'ready'
-                  : st.status;
+                  : st.status === 'unknown'
+                    ? 'ready'
+                    : st.status;
+          }
         }
         await this.states.put(st);
         this.events.emit({ type: 'profile.state', state: st });
@@ -842,9 +849,25 @@ export class IronProxy {
    * Cancel logins, wait for usage still being stored, then flush debounced state
    * and the usage store (`UsageStore.flush`, when it has one). Call on app quit.
    */
+  /**
+   * Run work the caller does not wait for (a status check after creating or
+   * enabling an account), but keep hold of it so close() can wait: otherwise a
+   * check that finishes after close() would still write state.json.
+   */
+  private inBackground(work: Promise<unknown>): void {
+    const p = work.then(
+      () => {},
+      () => {},
+    );
+    this.background.add(p);
+    void p.finally(() => this.background.delete(p));
+  }
+
   async close(): Promise<void> {
     for (const s of this.logins.values()) s.cancel();
     this.logins.clear();
+    // Background status checks write state; let them land before the final flush.
+    while (this.background.size) await Promise.all([...this.background]);
     // Let usage the router is still storing reach the history before unsubscribing.
     await this.router.settleUsage();
     for (const off of this.usageOff.splice(0)) off();
