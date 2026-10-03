@@ -1,6 +1,6 @@
 {
   "name": "@iron-proxy/proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Localhost proxy for Iron-Proxy: OpenAI- and Anthropic-compatible endpoints with account failover, plus a control API and an HTTP client. Zero runtime dependencies beyond @iron-proxy/core.",
   "license": "MIT",
   "type": "module",
