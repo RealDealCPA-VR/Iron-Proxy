@@ -52,6 +52,20 @@ export interface ProxyServer {
   close(): Promise<void>;
 }
 
+/** Injected at build time from package.json (tsup / vitest `define`). */
+declare const __IRON_PROXY_VERSION__: string | undefined;
+
+/** This proxy's version, as `GET /iron/health` reports it. */
+export const PROXY_VERSION: string =
+  typeof __IRON_PROXY_VERSION__ === 'string' ? __IRON_PROXY_VERSION__ : '0.0.0-dev';
+
+/**
+ * Capabilities `GET /iron/health` advertises, so a host can tell this proxy from
+ * an older one with the same version number. `executor-v1`: `GET /iron/pick`,
+ * `POST /iron/profiles/:id/signal` and `POST /iron/profiles/:id/finished`.
+ */
+export const PROXY_FEATURES: readonly string[] = ['executor-v1'];
+
 type Dialect = 'openai' | 'anthropic' | 'json';
 
 /** Lanes `/iron/pick` accepts; `any` picks across every lane. */
@@ -439,7 +453,13 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
       send(
         res,
         200,
-        { ok: true, name: 'iron-proxy', profiles: (await iron.listProfiles()).length },
+        {
+          ok: true,
+          name: 'iron-proxy',
+          profiles: (await iron.listProfiles()).length,
+          version: PROXY_VERSION,
+          features: PROXY_FEATURES,
+        },
         corsHeaders(req),
       );
       return;

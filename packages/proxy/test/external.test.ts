@@ -1,5 +1,6 @@
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { IronEvent, LaneKind, Profile } from '@iron-proxy/core';
 import { HttpIronClient, HttpIronClientError } from '../src/client.js';
@@ -55,6 +56,23 @@ async function put(
 }
 
 type IronBody = { iron: { code: string; details: Record<string, unknown>; hint?: string } };
+
+describe('GET /iron/health advertises the executor API', () => {
+  it('answers version and features (executor-v1) without a token', async () => {
+    const pkg = JSON.parse(
+      await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+    ) as { version: string };
+    const res = await fetch(`${h.url}/iron/health`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      name: 'iron-proxy',
+      profiles: 0,
+      version: pkg.version,
+      features: ['executor-v1'],
+    });
+  });
+});
 
 describe('external-executor routes', () => {
   it('require the bearer token', async () => {

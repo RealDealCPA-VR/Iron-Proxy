@@ -79,6 +79,15 @@ describe('single-file bundle', () => {
         if (!desc) await new Promise((r) => setTimeout(r, 50));
       }
       expect(desc?.pid).toBe(child.pid);
+      const pkg = JSON.parse(await readFile(join(PKG_DIR, 'package.json'), 'utf8')) as {
+        version: string;
+      };
+      const health = (await (await fetch(`${desc!.url}/iron/health`)).json()) as {
+        version?: string;
+        features?: string[];
+      };
+      expect(health.version).toBe(pkg.version);
+      expect(health.features).toContain('executor-v1');
       const res = await fetch(`${desc!.url}/iron/pick?provider=anthropic`, {
         headers: { authorization: `Bearer ${desc!.token}` },
       });

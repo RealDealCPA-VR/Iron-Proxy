@@ -1,6 +1,8 @@
 export {
   createProxyServer,
   errorBody,
+  PROXY_FEATURES,
+  PROXY_VERSION,
   statusForCode,
   type ProxyServer,
   type ProxyServerOptions,
