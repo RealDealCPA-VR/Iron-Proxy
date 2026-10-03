@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createIronProxy, type LoginCommandInfo } from '@iron-proxy/core';
+import { createIronProxy, type LoginCommandInfo, type Profile } from '@iron-proxy/core';
 import { createProxyServer, type ProxyServer, type ProxyServerOptions } from '@iron-proxy/proxy';
 import { startTrayApp, type TrayAppHandle } from '../src/app.js';
 import { TRAY_CHANNELS, type TrayInfo } from '../src/logic/channels.js';
@@ -508,33 +508,49 @@ describe('tray app wiring', () => {
         if (i >= 0) pending.splice(i, 1);
       },
     };
-    /** Advance the fake clock, running what falls due. */
-    const advance = async (ms: number) => {
+    /**
+     * Advance the fake clock, running what falls due. It never refreshes the tray
+     * itself: the relabel must come from the tray's own timers.
+     */
+    const advance = (ms: number) => {
       now += ms;
       for (;;) {
         const due = pending.filter((t) => t.at <= now).sort((a, b) => a.at - b.at)[0];
         if (!due) break;
         pending.splice(pending.indexOf(due), 1);
         due.fn();
-        await handle!.refresh();
       }
     };
     const electron = createFakeElectron();
-    handle = await start(electron, { timers });
+    // This test counts timers, so nothing outside the fake clock may schedule a
+    // refresh: no real data-dir watcher (the debounced state.json flush lands
+    // ~150 ms after a put, and macOS delivers it later still, possibly while the
+    // refresh below is in flight, which leaves a due debounce pending; the
+    // watcher has its own test), and no createProfile, whose background status
+    // check emits profile.state at a moment the test does not control.
+    handle = await start(electron, { timers, watch: () => ({ close: () => {} }) });
     const h = handle!;
-    const p = await h.iron.createProfile({
+    const p: Profile = {
+      id: 'work',
       title: 'Work Claude Max',
       provider: 'anthropic',
       lane: 'api-key',
-      apiKeySecret: 'sk-x',
-    });
-    const st = await h.iron.router.state(p.id);
+      order: 0,
+      enabled: true,
+      createdAt: '',
+      updatedAt: '',
+      apiKey: { secretRef: 'apikey:work' },
+    };
+    await h.iron.vault.set('apikey:work', 'sk-x');
+    await h.iron.profiles.put(p);
     await h.iron.states.put({
-      ...st,
+      profileId: p.id,
       status: 'parked',
+      served: 0,
       parkedUntil: '2026-09-24T15:40:00Z',
     });
-    await advance(0);
+    // Two rebuilds still leave one timer: each clears the one before.
+    await h.refresh();
     await h.refresh();
     expect(findItem(h.menu(), `account-${p.id}`)?.label).toBe(
       'Work Claude Max (parked until 3:40 PM)',
@@ -543,8 +559,11 @@ describe('tray app wiring', () => {
     // Exactly one timer is waiting, for the end of the rest (plus a second).
     expect(pending.map((t) => t.at)).toEqual([Date.parse('2026-09-24T15:40:01Z')]);
 
-    await advance(3 * 3_600_000 + 41 * 60_000);
-    expect(findItem(h.menu(), `account-${p.id}`)?.label).toBe('Work Claude Max');
+    // The rest ends: the expiry timer schedules the refresh that relabels.
+    advance(3 * 3_600_000 + 41 * 60_000);
+    await vi.waitFor(() =>
+      expect(findItem(h.menu(), `account-${p.id}`)?.label).toBe('Work Claude Max'),
+    );
     expect(electron.trays[0]!.tooltip).toBe('Iron-Proxy: Claude on "Work Claude Max"');
     expect(pending).toEqual([]);
   });
