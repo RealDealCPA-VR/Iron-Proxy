@@ -1,6 +1,6 @@
 {
   "name": "iron-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Command line for Iron-Proxy: run the local account-switching proxy, add and log in AI provider accounts, check status, chat.",
   "license": "MIT",
   "type": "module",
