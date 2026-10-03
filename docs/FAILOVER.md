@@ -16,6 +16,8 @@ Each provider's profiles carry an integer `order`. Lower serves first. `activate
 | `overloaded`      | 529 / 503, "overloaded"                             | retried on the same account `overloadRetries` times with backoff, then `overloadCooldownMs` (15 s) |
 | `auth-expired`    | 401, "not logged in", "token expired"               | not a timed park: the profile becomes `unauthenticated` until someone logs in                      |
 
+A 403 is `auth-expired` only when it is typed `authentication_error` or worded like an expired, revoked or invalid token. A 403 about the request itself (`permission_error`, "does not have access to this model", "Request not allowed") is not a quota signal at all: the error reaches the caller and the account stays in rotation.
+
 A provider-supplied reset (`resetAt` or `retryAfterMs`) always wins over the default, capped by `maxCooldownMs` (7 days) and floored at 1 s. Policy values can be overridden globally or per provider:
 
 ```ts

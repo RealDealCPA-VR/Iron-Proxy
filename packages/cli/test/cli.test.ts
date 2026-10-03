@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createIronProxy, type IronProxy } from '@iron-proxy/core';
-import { runCli, readProxyDescriptor, table, type CliIo } from '../src/index.js';
+import { runCli, readProxyDescriptor, table, VERSION, type CliIo } from '../src/index.js';
 
 const FAKE = fileURLToPath(
   new URL('../../core/test/fixtures/fake-cli/fake-cli.mjs', import.meta.url),
@@ -42,6 +42,16 @@ describe('iron-proxy CLI', () => {
     const u = io();
     expect(await runCli(['bogus'], u.io)).toBe(2);
     expect(u.err()).toContain('Unknown command');
+  });
+
+  it('prints its package version with --version', async () => {
+    const pkg = JSON.parse(
+      await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+    ) as { version: string };
+    const v = io();
+    expect(await runCli(['--version'], v.io)).toBe(0);
+    expect(v.out()).toBe(`${pkg.version}\n`);
+    expect(VERSION).toBe(pkg.version);
   });
 
   it('adds, lists, renames, activates and removes profiles', async () => {

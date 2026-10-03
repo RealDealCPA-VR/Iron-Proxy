@@ -8,6 +8,7 @@ import type {
   StreamEvent,
   UnifiedRequest,
   UnifiedResponse,
+  Usage,
   UsageSnapshot,
 } from '../types.js';
 import { DEFAULT_POLICY } from '../types.js';
@@ -656,6 +657,37 @@ export class Router {
         ...(reason ? { reason } : {}),
       });
     }
+  }
+
+  /**
+   * Record a request that ran outside the router (an external executor ran the
+   * vendor CLI as this account itself) exactly like one the router served: the
+   * profile becomes the provider's `active`, `served` increments, a switch away
+   * from the previous active account is announced (with that account's park
+   * reason, when it is parked), and `request.finished` carries the usage.
+   */
+  async recordServed(
+    profile: Profile,
+    info: { durationMs?: number; usage?: Usage; model?: string } = {},
+  ): Promise<ProfileState> {
+    const provider = profile.provider;
+    const prev = this.activeByProvider.get(provider);
+    let reason: QuotaSignal | undefined;
+    if (prev && prev !== profile.id) {
+      const ps = await this.state(prev);
+      if (ps.status === 'parked' || ps.status === 'unauthenticated') reason = ps.parkedReason;
+    }
+    await this.markServed(profile, provider, reason);
+    this.deps.emitter.emit({
+      type: 'request.finished',
+      requestId: newId('req'),
+      provider,
+      profileId: profile.id,
+      durationMs: info.durationMs ?? 0,
+      ...(info.usage ? { usage: info.usage } : {}),
+      ...(info.model ? { model: info.model } : {}),
+    });
+    return this.state(profile.id);
   }
 
   async park(profile: Profile, signal: QuotaSignal): Promise<void> {

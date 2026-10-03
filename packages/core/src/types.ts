@@ -196,6 +196,30 @@ export interface Usage {
   cacheWriteTokens?: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* External executors (IronProxy.reportSignal / reportFinished)        */
+/* ------------------------------------------------------------------ */
+
+/** What a host that ran the vendor CLI itself saw when the attempt failed. */
+export interface ExternalSignalInput {
+  /** HTTP status of the failed call, when there was one (then `detectFromHttp` classifies). */
+  status?: number;
+  /** Response headers, lowercase names (`retry-after`, `anthropic-ratelimit-*`, `x-ratelimit-*`). */
+  headers?: Record<string, string>;
+  /** The error body, or what the CLI printed (classified by `detectFromCliOutput` without `status`). */
+  text?: string;
+}
+
+export type ExternalSignalResult =
+  { parked: true; signal: QuotaSignal; state: ProfileState } | { parked: false };
+
+/** A request a host ran itself on a picked account, which succeeded. */
+export interface ExternalFinishedInput {
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number };
+  durationMs?: number;
+  model?: string;
+}
+
 export interface UnifiedResponse {
   id: string;
   model: string;
@@ -317,6 +341,8 @@ export type IronEvent =
       profileId: string;
       durationMs: number;
       usage?: Usage;
+      /** The model the request ran on; set only by an external executor's report (`reportFinished`). */
+      model?: string;
     }
   | { type: 'request.failed'; requestId: string; provider: ProviderId; error: SerializedError }
   | { type: 'login'; event: LoginEvent };

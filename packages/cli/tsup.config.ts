@@ -1,4 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
+
+const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
+const define = { __IRON_PROXY_VERSION__: JSON.stringify(version) };
 
 export default defineConfig([
   {
@@ -9,6 +13,7 @@ export default defineConfig([
     clean: true,
     target: 'node20',
     platform: 'node',
+    define,
     external: ['@iron-proxy/core', '@iron-proxy/proxy'],
   },
   {
@@ -18,6 +23,7 @@ export default defineConfig([
     sourcemap: true,
     target: 'node20',
     platform: 'node',
+    define,
     external: ['@iron-proxy/core', '@iron-proxy/proxy'],
   },
 ]);

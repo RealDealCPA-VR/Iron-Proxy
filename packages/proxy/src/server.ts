@@ -10,8 +10,11 @@ import {
   openaiWire,
   serializeError,
   sseFrame,
+  type ExternalFinishedInput,
+  type ExternalSignalInput,
   type IronEvent,
   type IronProxy,
+  type LaneKind,
   type LoginSession,
   type ProviderId,
   type RunOptions,
@@ -50,6 +53,9 @@ export interface ProxyServer {
 }
 
 type Dialect = 'openai' | 'anthropic' | 'json';
+
+/** Lanes `/iron/pick` accepts; `any` picks across every lane. */
+const LANES = ['cli', 'api-key', 'oauth', 'any'];
 
 class HttpError extends Error {
   constructor(
@@ -472,6 +478,20 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
         h,
       );
     }
+    if (sub === 'pick' && method === 'GET' && !id) {
+      const q = new URL(req.url ?? '/', 'http://localhost').searchParams;
+      const provider = q.get('provider');
+      if (!provider)
+        throw new HttpError(400, '`provider` is required: /iron/pick?provider=anthropic.');
+      const lane = q.get('lane') || 'cli';
+      if (!LANES.includes(lane))
+        throw new HttpError(400, `\`lane\` must be one of ${LANES.join(', ')}, not "${lane}".`);
+      const profile = await iron.pickProfile(provider as ProviderId, {
+        lane: lane as LaneKind | 'any',
+      });
+      const env = profile.lane === 'cli' ? await iron.shellEnv(profile.id) : null;
+      return send(res, 200, { profile, env }, h);
+    }
     if (sub === 'refresh' && method === 'POST') {
       const body = await readJson<{ id?: string }>(req);
       return send(res, 200, await client.refreshStatus(body.id), h);
@@ -532,6 +552,16 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
       if (method === 'POST' && action === 'unpark') {
         await client.unpark(id);
         return send(res, 200, { ok: true }, h);
+      }
+      if (method === 'POST' && action === 'signal' && !action2) {
+        // The manager validates the body (INVALID_REQUEST -> 400), for library callers too.
+        const body = await readJson<ExternalSignalInput>(req);
+        return send(res, 200, await iron.reportSignal(id, body), h);
+      }
+      if (method === 'POST' && action === 'finished' && !action2) {
+        const body = await readJson<ExternalFinishedInput>(req);
+        const state = await iron.reportFinished(id, body);
+        return send(res, 200, { ok: true, state }, h);
       }
       if (method === 'GET' && action === 'models')
         return send(res, 200, await client.listModels(id), h);

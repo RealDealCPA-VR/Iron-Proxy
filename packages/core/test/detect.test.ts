@@ -87,6 +87,40 @@ describe('detectFromHttp', () => {
     const h = new Headers({ 'Retry-After': '5' });
     expect(detectFromHttp('openai', 429, headersFrom(h), '', now)?.retryAfterMs).toBe(5000);
   });
+  it('a 403 about the request (permission_error, model access, not allowed) is not an expired login', () => {
+    for (const body of [
+      '{"type":"error","error":{"type":"permission_error","message":"Your account does not have access to this model."}}',
+      '{"type":"error","error":{"type":"permission_error","message":"Permission denied for this request"}}',
+      '{"error":{"message":"This organization does not have access to claude-opus-5."}}',
+      '{"error":{"message":"You do not have permission to use this model."}}',
+      '{"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}',
+      // Request-shaped wording wins over an auth word elsewhere in the message.
+      '{"type":"error","error":{"type":"permission_error","message":"Your authentication token does not have access to this model."}}',
+    ]) {
+      expect(detectFromHttp('anthropic', 403, headersFrom({}), body, now), body).toBeUndefined();
+    }
+  });
+  it('a 401, or a 403 typed authentication_error or worded like a dead token, is auth-expired', () => {
+    const auth = (status: number, body: string) =>
+      detectFromHttp('anthropic', status, headersFrom({}), body, now)?.kind;
+    expect(auth(401, '')).toBe('auth-expired');
+    expect(auth(401, '{"error":{"type":"permission_error","message":"x"}}')).toBe('auth-expired');
+    expect(
+      auth(403, '{"type":"error","error":{"type":"authentication_error","message":"Forbidden"}}'),
+    ).toBe('auth-expired');
+    // The type wins over request-shaped wording in its message.
+    expect(
+      auth(
+        403,
+        '{"type":"error","error":{"type":"authentication_error","message":"Request not allowed"}}',
+      ),
+    ).toBe('auth-expired');
+    expect(auth(403, '{"error":{"message":"OAuth token has expired."}}')).toBe('auth-expired');
+    expect(auth(403, '{"error":{"message":"OAuth token revoked"}}')).toBe('auth-expired');
+    expect(auth(403, 'Invalid API key provided')).toBe('auth-expired');
+    expect(auth(403, 'Unauthorized')).toBe('auth-expired');
+    expect(auth(403, 'Forbidden')).toBeUndefined();
+  });
 });
 
 describe('detectFromCliOutput', () => {

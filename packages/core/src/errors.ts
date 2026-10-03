@@ -166,7 +166,10 @@ export class AuthRequiredError extends IronProxyError {
       ctx.lane === 'api-key'
         ? `Enter the API key for ${who} again: 'Set API key' on it in the switcher.`
         : `Log ${who} in again: iron-proxy login ${profileId}, or 'Log in' on it in the switcher.`;
-    super('AUTH_REQUIRED', message, { details: { profileId }, hint });
+    super('AUTH_REQUIRED', message, {
+      details: { profileId, ...(ctx.title ? { title: ctx.title } : {}) },
+      hint,
+    });
     this.name = 'AuthRequiredError';
   }
 }
@@ -202,7 +205,13 @@ export class AllProfilesExhaustedError extends IronProxyError {
       `Every ${provider} account is parked.${when} Iron-Proxy never switches providers on its own.`,
       {
         retryable: true,
-        details: { provider, earliestResetAt, tried },
+        // `resetAt` repeats `earliestResetAt` under the name the external-executor API documents.
+        details: {
+          provider,
+          earliestResetAt,
+          ...(earliestResetAt ? { resetAt: earliestResetAt } : {}),
+          tried,
+        },
         hint: `${wait}, or add another ${provider} account: ${addAccountCommand(provider)}.`,
       },
     );

@@ -5,6 +5,9 @@ import type {
   AdoptLoginInput,
   CliProbe,
   DiscoveredLogin,
+  ExternalFinishedInput,
+  ExternalSignalInput,
+  ExternalSignalResult,
   FailoverPolicy,
   IronEvent,
   LaneKind,
@@ -14,6 +17,7 @@ import type {
   ProfilePatch,
   ProfileState,
   ProviderId,
+  QuotaSignal,
   RunOptions,
   StreamEvent,
   UnifiedRequest,
@@ -40,7 +44,8 @@ import { FileStateStore, type StateStore } from './store/state-store.js';
 import { FileUsageStore, type UsageStore } from './store/usage-store.js';
 import { buildUsageReport } from './usage/report.js';
 import { FileVault, type KeyProtector, type Vault } from './vault/vault.js';
-import { isoNow, newId, systemClock, type Clock } from './util.js';
+import { detectFromCliOutput, detectFromHttp, headersFrom } from './quota/detect.js';
+import { isoNow, newId, redactSecrets, systemClock, type Clock } from './util.js';
 
 export interface IronProxyOptions {
   /** Where profiles, state, the vault and isolated CLI homes live. Default `~/.iron-proxy`. */
@@ -766,6 +771,51 @@ export class IronProxy {
   }
 
   /* ---------------------------------------------------------------- */
+  /* External executors                                               */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * An external executor (a host that ran the vendor CLI as this account itself,
+   * after `pickProfile`) reports what it saw. Iron-Proxy classifies it with its own
+   * detectors: `detectFromHttp` when `status` is given, otherwise
+   * `detectFromCliOutput` on `text`. A quota signal parks the profile through the
+   * router's own park path (same `profile.parked` event, same usage park record,
+   * same state; `auth-expired` leaves it `unauthenticated`, the "needs sign-in"
+   * state). Anything else (a model-access 403, a plain error) parks nothing.
+   */
+  async reportSignal(id: string, input: ExternalSignalInput): Promise<ExternalSignalResult> {
+    const p = await this.getProfile(id);
+    const { status, headers, text } = validateSignalInput(input);
+    const now = this.clock.now();
+    const found =
+      status !== undefined
+        ? detectFromHttp(p.provider, status, headersFrom(headers ?? {}), text, now)
+        : detectFromCliOutput(p.provider, text ?? '', now);
+    if (!found) return { parked: false };
+    // The text came from outside: never let a key it quoted reach state, events or UI.
+    const signal: QuotaSignal =
+      found.message !== undefined ? { ...found, message: redactSecrets(found.message) } : found;
+    await this.router.park(p, signal);
+    return { parked: true, signal, state: await this.router.state(id) };
+  }
+
+  /**
+   * An external executor ran a request on this account and it succeeded. Recorded
+   * exactly like a request the router served: the profile becomes its provider's
+   * `active`, `served` increments, `request.finished` is emitted and a usage record
+   * is appended (time, duration, token counts; never text).
+   */
+  async reportFinished(id: string, input: ExternalFinishedInput = {}): Promise<ProfileState> {
+    const p = await this.getProfile(id);
+    const { usage, durationMs, model } = validateFinishedInput(input);
+    return this.router.recordServed(p, {
+      ...(usage ? { usage } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(model ? { model } : {}),
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
   /* State + diagnostics                                              */
   /* ---------------------------------------------------------------- */
 
@@ -876,6 +926,74 @@ export class IronProxy {
     if (this.states instanceof FileStateStore) await this.states.flush();
     this.events.removeAll();
   }
+}
+
+function badInput(message: string): IronProxyError {
+  return new IronProxyError('INVALID_REQUEST', message, {
+    hint: 'Check the body against the external-executor API in docs/ADOPTING.md.',
+  });
+}
+
+const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+
+function validateSignalInput(input: ExternalSignalInput): ExternalSignalInput {
+  if (!input || typeof input !== 'object' || Array.isArray(input))
+    throw badInput('The signal must be an object: { status?, headers?, text? }.');
+  const { status, headers, text } = input;
+  if (status !== undefined && (!Number.isInteger(status) || status < 100 || status > 599))
+    throw badInput('`status` must be an HTTP status code (100-599).');
+  if (text !== undefined && typeof text !== 'string') throw badInput('`text` must be a string.');
+  if (
+    headers !== undefined &&
+    (!headers ||
+      typeof headers !== 'object' ||
+      Array.isArray(headers) ||
+      Object.values(headers).some((v) => typeof v !== 'string'))
+  )
+    throw badInput('`headers` must be an object of string values.');
+  if (status === undefined && !text?.trim())
+    throw badInput('A signal needs `status` (an HTTP failure) or `text` (what the CLI printed).');
+  return {
+    ...(status !== undefined ? { status } : {}),
+    ...(headers !== undefined ? { headers } : {}),
+    ...(text !== undefined ? { text } : {}),
+  };
+}
+
+function validateFinishedInput(input: ExternalFinishedInput): ExternalFinishedInput {
+  if (!input || typeof input !== 'object' || Array.isArray(input))
+    throw badInput('The report must be an object: { usage?, durationMs?, model? }.');
+  const { usage, durationMs, model } = input;
+  if (usage !== undefined) {
+    if (
+      !usage ||
+      typeof usage !== 'object' ||
+      !isCount(usage.inputTokens) ||
+      !isCount(usage.outputTokens) ||
+      (usage.cacheReadTokens !== undefined && !isCount(usage.cacheReadTokens))
+    )
+      throw badInput(
+        '`usage` needs non-negative integer `inputTokens` and `outputTokens` (and optional `cacheReadTokens`).',
+      );
+  }
+  if (durationMs !== undefined && !isCount(durationMs))
+    throw badInput('`durationMs` must be a non-negative integer.');
+  if (model !== undefined && typeof model !== 'string') throw badInput('`model` must be a string.');
+  return {
+    ...(usage
+      ? {
+          usage: {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            ...(usage.cacheReadTokens !== undefined
+              ? { cacheReadTokens: usage.cacheReadTokens }
+              : {}),
+          },
+        }
+      : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(model ? { model } : {}),
+  };
 }
 
 function freeTitle(base: string, taken: Set<string>): string {

@@ -24,6 +24,7 @@
   ],
   "scripts": {
     "build": "tsup",
+    "bundle": "tsup --config tsup.bundle.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

@@ -15,6 +15,8 @@ Headers: `x-iron-provider` forces a provider, `x-iron-profile` pins an account, 
 
 Error bodies keep each dialect's shape and add an `iron` object: `{ code, retryable, details, hint }`, where `hint` is one sentence telling the user what to do next. `GET /iron/discover` lists vendor CLIs already signed in on this machine; `POST /iron/adopt` (`{ provider, home, title? }`) turns one into a profile in place. `GET /iron/usage[?profileId=]` returns the usage report (requests and tokens per window, parks this week, the time-left estimate when there is one); `HttpIronClient.usageReport(profileId?)` calls it.
 
+**External-executor API**, for hosts that run the vendor CLI themselves and use Iron-Proxy as the account manager: `GET /iron/pick?provider=<id>[&lane=cli]` answers `{ profile, env: { set, unset } }` (the account to use now and the variables that run its CLI as it); `POST /iron/profiles/:id/signal` (`{ status?, headers?, text? }`) lets Iron-Proxy's own detectors classify a failure and park the account on a quota signal (`{ parked: true, signal, state }` or `{ parked: false }`); `POST /iron/profiles/:id/finished` (`{ usage?, durationMs?, model? }`) records a success like an internal one (`{ ok: true, state }`). `HttpIronClient.pick / signal / finished` call them; they are not on `IronClient`. Errors, codes and details: docs/ADOPTING.md, "Running the vendor CLI yourself".
+
 The HTTP client implements the same `IronClient` the React switcher and the Electron bridge use:
 
 ```ts

@@ -110,7 +110,7 @@ import { HttpIronClient } from '@iron-proxy/proxy/client';
 <AccountSwitcher client={new HttpIronClient('http://127.0.0.1:8791', token)} />;
 ```
 
-Spawn the proxy as a child process from your app if you do not want a separate daemon; `proxy.json` tells you where it is listening.
+Spawn the proxy as a child process from your app if you do not want a separate daemon; `proxy.json` tells you where it is listening. To ship it inside your app, `pnpm --filter iron-proxy bundle` (from a clone of this repository) writes the whole CLI as one dependency-free ESM file, `packages/cli/dist-bundle/iron-proxy.mjs`; run it with your own Node (`node iron-proxy.mjs serve --port 0 --data-dir <dir>`) or, in an Electron app, with Electron itself as Node (`ELECTRON_RUN_AS_NODE=1 <electron exe> iron-proxy.mjs serve …`). `--port 0` picks a free port and `serve` creates the data directory when it is missing; `iron-proxy.mjs --version` prints the version it was built from.
 
 ## 3. Node library only
 
@@ -158,6 +158,30 @@ To use an account from the user's own terminal:
 - `iron-proxy env <provider> [--profile id] [--shell bash|powershell|cmd]` prints the lines to paste or eval (`iron.shellEnv(id)`; the default is PowerShell on Windows and bash elsewhere, so use `eval "$(iron-proxy env anthropic --shell bash)"` in Git Bash): the home variable and the profile's `cli.env` entries, plus lines clearing the API-key variables for bash and PowerShell. Never `PATH`, never a secret.
 - `pickProfile` throws `NO_PROFILE`, `ALL_PROFILES_EXHAUSTED` (with the earliest reset) or `AUTH_REQUIRED`, each with its hint; with `profileId` it returns that account (even when parked or signed out; `run` and `env` then print a `Note:` line on stderr saying so) or `INVALID_REQUEST` when it is not a cli account of that provider.
 - **An interactive session cannot switch accounts mid-session.** Failover happens between requests Iron-Proxy runs; a vendor CLI you are typing into stays on the account it started with. When it hits the limit, quit and `iron-proxy run` again: the next ready account is picked.
+
+## Running the vendor CLI yourself (the external-executor API)
+
+Some hosts already drive the vendor CLI themselves (their own streaming, tools and images) and want Iron-Proxy only as the **account manager**: which accounts exist, their order, who is parked until when, sign-in and usage. They ask Iron-Proxy which account to use, run the CLI as that account, and report what happened. Same provider only: Iron-Proxy never answers with another provider's account.
+
+1. **Pick.** `GET /iron/pick?provider=anthropic[&lane=cli]` (`lane` is `cli` by default; also `api-key`, `oauth`, `any`) answers `200 { "profile": Profile, "env": { "set": { "CLAUDE_CONFIG_DIR": "<abs path>" }, "unset": ["ANTHROPIC_API_KEY", …] } }`: the account a request would use right now (`iron.pickProfile`, expired parks cleared exactly as a request clears them) and the variables that run its vendor CLI as that account (`iron.shellEnv`: the home variable and the profile's `cli.env`; `unset` lists the API-key variables to remove from the child's environment so a stray key cannot bypass the subscription). `env` is `null` when the pick is not a cli account.
+2. **Run** the vendor CLI with that environment.
+3. **Report a failure:** `POST /iron/profiles/:id/signal` with `{ "status"?: number, "headers"?: { "<lowercase name>": "value" }, "text"?: string }`. Iron-Proxy classifies it with its own detectors (`detectFromHttp` when `status` is given, otherwise `detectFromCliOutput` on `text`) and, on a quota signal, parks the account through the router's own park path (the same `profile.parked` event, usage park record and state as an internal park; `auth-expired` leaves it `unauthenticated`, which is "needs sign-in"). Answers `{ "parked": true, "signal": { "kind", "resetAt"?, "message"?, … }, "state": ProfileState }` or `{ "parked": false }` (a model-access 403 or any error that is not about the account). Hand over the raw status, the `retry-after` / `anthropic-ratelimit-*` / `x-ratelimit-*` headers and the body or CLI text; let Iron-Proxy decide. Then pick again: the next account of the same provider comes back, or one of the errors below.
+4. **Report a success:** `POST /iron/profiles/:id/finished` with `{ "usage"?: { "inputTokens": int, "outputTokens": int, "cacheReadTokens"?: int }, "durationMs"?: int, "model"?: string }`. Recorded exactly like a request Iron-Proxy ran: the account becomes its provider's `active`, `served` increments, `request.finished` is emitted (with `model` when given) and a usage record is appended. Answers `{ "ok": true, "state": ProfileState }`.
+
+All three need the bearer token. In Node the same calls are `iron.pickProfile()` + `iron.shellEnv()`, `iron.reportSignal(id, input)` and `iron.reportFinished(id, input)`; over HTTP from TypeScript, `HttpIronClient.pick(provider, { lane? })`, `.signal(id, input)` and `.finished(id, input)`. They are deliberately **not** part of the `IronClient` interface (the switcher, the Electron bridge and the React package do not use them).
+
+**Errors.** Every `/iron/*` error is `status` + `{ "error": { "message", "code" }, "iron": { "code", "retryable", "details", "hint"? } }`. Read `iron.code`; `iron.hint` is one sentence for the user.
+
+| `iron.code`              | Status | When                                                       | `iron.details`                                                         |
+| ------------------------ | ------ | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `NO_PROFILE`             | 404    | no enabled account of that provider on that lane           | `{ provider }`                                                         |
+| `ALL_PROFILES_EXHAUSTED` | 429    | every such account is parked (also a `retry-after`)        | `{ provider, resetAt?, earliestResetAt?, tried }` (`resetAt` = ISO)    |
+| `AUTH_REQUIRED`          | 401    | the rest need sign-in (`profileId` / `title` of the first) | `{ profileId, title? }`                                                |
+| `AUTH_REQUIRED`          | 401    | the bearer token is missing or wrong                       | `{}` (no `profileId`: tell this apart from an account needing sign-in) |
+| `INVALID_REQUEST`        | 400    | missing/unknown provider or lane, a bad body               | varies                                                                 |
+| `PROFILE_NOT_FOUND`      | 404    | `:id` does not exist                                       | `{ profileId }`                                                        |
+
+A parked account is skipped by the next pick until its reset; a signed-out one until it signs in again (`POST /iron/profiles/:id/login`, or the login command from `GET /iron/profiles/:id/login-command` run in a terminal).
 
 ## Every error says what to do next
 

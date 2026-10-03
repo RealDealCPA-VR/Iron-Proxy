@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
@@ -28,6 +28,13 @@ import {
 import { createProxyServer } from '@iron-proxy/proxy';
 import { buildLaunch, launchInteractive, type SpawnFn } from './launch.js';
 
+/** Injected at build time from package.json (tsup / vitest `define`). */
+declare const __IRON_PROXY_VERSION__: string | undefined;
+
+/** This CLI's version, as `iron-proxy --version` prints it. */
+export const VERSION: string =
+  typeof __IRON_PROXY_VERSION__ === 'string' ? __IRON_PROXY_VERSION__ : '0.0.0-dev';
+
 export interface CliIo {
   stdout: { write(s: string): unknown };
   stderr: { write(s: string): unknown };
@@ -52,6 +59,7 @@ export interface CliIo {
 const HELP = `iron-proxy — bring-your-own-subscription account switching for AI providers
 
 Usage:
+  iron-proxy --version
   iron-proxy setup [--yes]
   iron-proxy serve [--port 8791] [--host 127.0.0.1] [--token T] [--data-dir D] [--cors]
   iron-proxy profiles list [--json]
@@ -85,6 +93,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       strict: true,
       options: {
         help: { type: 'boolean', short: 'h' },
+        version: { type: 'boolean', short: 'v' },
         json: { type: 'boolean' },
         port: { type: 'string' },
         host: { type: 'string' },
@@ -111,6 +120,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   }
   const { values, positionals } = parsed;
   const [cmd, ...rest] = positionals;
+  if (values.version) {
+    io.stdout.write(`${VERSION}\n`);
+    return 0;
+  }
   if (!cmd || values.help) {
     io.stdout.write(HELP);
     return values.help ? 0 : 1;
@@ -285,6 +298,8 @@ async function serve(
   });
   const info = await proxy.listen();
   const descriptor = join(dataDir, 'proxy.json');
+  // A first run (or a host that starts serve before anything else) may have no data dir yet.
+  await mkdir(dataDir, { recursive: true });
   await writeFile(
     descriptor,
     JSON.stringify({ url: info.url, token: info.token, pid: process.pid }, null, 2),

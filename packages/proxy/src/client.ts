@@ -7,8 +7,12 @@ import type {
   AdoptLoginInput,
   CliProbe,
   DiscoveredLogin,
+  ExternalFinishedInput,
+  ExternalSignalInput,
+  ExternalSignalResult,
   IronClient,
   IronEvent,
+  LaneKind,
   LoginCommandInfo,
   Profile,
   ProfileInput,
@@ -25,6 +29,13 @@ export interface HttpIronClientOptions {
   reconnectMaxMs?: number;
   /** Give up waiting for a login after this long. */
   loginTimeoutMs?: number;
+}
+
+/** What `GET /iron/pick` answers. */
+export interface PickResult {
+  profile: Profile;
+  /** How to run the vendor CLI as this account: variables to set and to remove. Null for a non-cli pick. */
+  env: { set: Record<string, string>; unset: string[] } | null;
 }
 
 export class HttpIronClientError extends Error {
@@ -180,6 +191,32 @@ export class HttpIronClient implements IronClient {
       'GET',
       `/iron/usage${profileId ? `?profileId=${encodeURIComponent(profileId)}` : ''}`,
     );
+  }
+
+  /* -------------------------------------------------------------- */
+  /* External-executor API: not part of IronClient (see ADOPTING.md) */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * The account a request for `provider` should use right now, and the
+   * environment that runs its vendor CLI as that account (`env` is null for a
+   * non-cli pick). Throws `HttpIronClientError` with code `NO_PROFILE`,
+   * `ALL_PROFILES_EXHAUSTED` (details.resetAt) or `AUTH_REQUIRED` (details.profileId).
+   */
+  pick(provider: ProviderId, opts: { lane?: LaneKind | 'any' } = {}): Promise<PickResult> {
+    const q = new URLSearchParams({ provider, lane: opts.lane ?? 'cli' });
+    return this.call('GET', `/iron/pick?${q.toString()}`);
+  }
+  /** Report a failed attempt; Iron-Proxy classifies it and parks the account on a quota signal. */
+  signal(id: string, input: ExternalSignalInput): Promise<ExternalSignalResult> {
+    return this.call('POST', `/iron/profiles/${encodeURIComponent(id)}/signal`, input);
+  }
+  /** Report a request that succeeded on this account (usage is recorded like an internal one). */
+  finished(
+    id: string,
+    input: ExternalFinishedInput = {},
+  ): Promise<{ ok: true; state: ProfileState }> {
+    return this.call('POST', `/iron/profiles/${encodeURIComponent(id)}/finished`, input);
   }
 
   /** Subscribe to `/iron/events`. Reconnects with backoff until unsubscribed. */

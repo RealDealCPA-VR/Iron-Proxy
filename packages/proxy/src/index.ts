@@ -9,5 +9,6 @@ export {
   HttpIronClient,
   HttpIronClientError,
   type HttpIronClientOptions,
+  type PickResult,
   type ProxyDescriptor,
 } from './client.js';

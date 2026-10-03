@@ -44,10 +44,7 @@ export function detectFromHttp(
     : undefined;
 
   if (status === 401 || status === 403) {
-    if (
-      /invalid.*(api key|token)|expired|unauthorized|authentication|permission/i.test(body) ||
-      status === 401
-    ) {
+    if (status === 401 || isAuthForbidden(body)) {
       return {
         kind: 'auth-expired',
         source: 'status',
@@ -101,6 +98,20 @@ export function detectFromHttp(
   }
 
   return undefined;
+}
+
+/**
+ * Whether a 403 means the account's login is no longer valid. A 403 typed
+ * `authentication_error`, or worded like an expired / revoked / invalid token,
+ * is. A 403 about the request itself (`permission_error`, no access to this
+ * model, "Request not allowed") is not: the account is healthy and parking it
+ * would take a working login out of rotation.
+ */
+function isAuthForbidden(body: string): boolean {
+  if (/authentication_error/i.test(body)) return true;
+  if (/permission_error|does not have access|model access|request not allowed/i.test(body))
+    return false;
+  return /invalid.*(api key|token)|expired|revoked|unauthorized|authentication/i.test(body);
 }
 
 function resetFromHeaders(
