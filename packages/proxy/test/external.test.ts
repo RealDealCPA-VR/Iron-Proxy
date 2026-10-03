@@ -2,7 +2,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { IronEvent, LaneKind, Profile } from '@iron-proxy/core';
+import type { IronEvent, LaneKind, Profile, ProviderId, QuotaSignal } from '@iron-proxy/core';
 import { HttpIronClient, HttpIronClientError } from '../src/client.js';
 import { harness, type Harness } from './helpers.js';
 
@@ -31,16 +31,23 @@ const post = (path: string, body: unknown, headers: Record<string, string> = aut
 async function put(
   id: string,
   order: number,
-  extra: { lane?: LaneKind; status?: 'ready' | 'parked' | 'unauthenticated'; until?: string } = {},
+  extra: {
+    lane?: LaneKind;
+    provider?: ProviderId;
+    enabled?: boolean;
+    status?: 'ready' | 'parked' | 'unauthenticated';
+    until?: string;
+    reason?: QuotaSignal;
+  } = {},
 ): Promise<Profile> {
   const lane = extra.lane ?? 'cli';
   const p: Profile = {
     id,
     title: `T ${id}`,
-    provider: 'anthropic',
+    provider: extra.provider ?? 'anthropic',
     lane,
     order,
-    enabled: true,
+    enabled: extra.enabled ?? true,
     createdAt: '',
     updatedAt: '',
     ...(lane === 'cli' ? { cli: { home: join(h.dir, id) } } : { apiKey: { secretRef: `k:${id}` } }),
@@ -51,6 +58,7 @@ async function put(
     status: extra.status ?? 'ready',
     served: 0,
     ...(extra.until ? { parkedUntil: extra.until } : {}),
+    ...(extra.reason ? { parkedReason: extra.reason } : {}),
   });
   return p;
 }
@@ -58,7 +66,7 @@ async function put(
 type IronBody = { iron: { code: string; details: Record<string, unknown>; hint?: string } };
 
 describe('GET /iron/health advertises the executor API', () => {
-  it('answers version and features (executor-v1) without a token', async () => {
+  it('answers version and features (executor-v1, pick-profile) without a token', async () => {
     const pkg = JSON.parse(
       await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
     ) as { version: string };
@@ -69,7 +77,7 @@ describe('GET /iron/health advertises the executor API', () => {
       name: 'iron-proxy',
       profiles: 0,
       version: pkg.version,
-      features: ['executor-v1'],
+      features: ['executor-v1', 'pick-profile'],
     });
   });
 });
@@ -153,6 +161,114 @@ describe('GET /iron/pick', () => {
       expect(res.status, q).toBe(400);
       expect(((await res.json()) as IronBody).iron.code).toBe('INVALID_REQUEST');
     }
+  });
+});
+
+describe('GET /iron/pick?profileId=', () => {
+  type ErrBody = IronBody & {
+    error: { message: string; code: string };
+    iron: { retryable: boolean };
+  };
+  const pickById = async (q: string) => {
+    const res = await get(`/iron/pick?${q}`);
+    return { res, body: (await res.json()) as ErrBody & { profile?: Profile; env?: unknown } };
+  };
+
+  it('answers that account and its env even when another one comes first', async () => {
+    await put('a', 0);
+    await put('b', 1);
+    const { res, body } = await pickById('provider=anthropic&profileId=b');
+    expect(res.status).toBe(200);
+    expect(body.profile?.id).toBe('b');
+    expect(body).toMatchObject({ env: { set: { CLAUDE_CONFIG_DIR: join(h.dir, 'b') } } });
+    await put('k', 2, { lane: 'api-key' });
+    expect((await pickById('provider=anthropic&lane=api-key&profileId=k')).body).toMatchObject({
+      profile: { id: 'k' },
+      env: null,
+    });
+  });
+
+  it('another provider, another lane or a disabled account is INVALID_REQUEST (400)', async () => {
+    await put('a', 0);
+    await put('o', 0, { provider: 'openai' });
+    await put('k', 1, { lane: 'api-key' });
+    await put('off', 2, { enabled: false });
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['provider=anthropic&profileId=o', { profileId: 'o', provider: 'openai', lane: 'cli' }],
+      [
+        'provider=anthropic&profileId=k',
+        { profileId: 'k', provider: 'anthropic', lane: 'api-key' },
+      ],
+      ['provider=anthropic&lane=api-key&profileId=a', { profileId: 'a', lane: 'cli' }],
+      ['provider=anthropic&profileId=off', { profileId: 'off' }],
+    ];
+    for (const [q, details] of cases) {
+      const { res, body } = await pickById(q);
+      expect(res.status, q).toBe(400);
+      expect(body.iron, q).toMatchObject({ code: 'INVALID_REQUEST', details });
+      expect(body.iron.hint, q).toBeTruthy();
+    }
+    expect((await pickById('provider=anthropic&profileId=off')).body.error.message).toContain(
+      'disabled',
+    );
+  });
+
+  it('a parked account is QUOTA_EXCEEDED (429) with resetAt, kind and retry-after, not another account', async () => {
+    const until = new Date(Date.now() + 600_000).toISOString();
+    await put('a', 0);
+    await put('b', 1, {
+      status: 'parked',
+      until,
+      reason: { kind: 'quota-exhausted', source: 'cli-output', resetAt: until },
+    });
+    const { res, body } = await pickById('provider=anthropic&profileId=b');
+    expect(res.status).toBe(429);
+    expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(590);
+    expect(body.profile).toBeUndefined();
+    expect(body.error.code).toBe('QUOTA_EXCEEDED');
+    expect(body.iron).toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      retryable: true,
+      details: {
+        profileId: 'b',
+        title: 'T b',
+        provider: 'anthropic',
+        resetAt: until,
+        kind: 'quota-exhausted',
+      },
+    });
+    expect(body.iron.hint).toContain('T b');
+    expect((await h.iron.allStates()).b?.status).toBe('parked');
+  });
+
+  it('a park whose reset has passed is cleared and the account answered', async () => {
+    await put('b', 1, { status: 'parked', until: new Date(Date.now() - 1_000).toISOString() });
+    const { res, body } = await pickById('provider=anthropic&profileId=b');
+    expect(res.status).toBe(200);
+    expect(body.profile?.id).toBe('b');
+    expect((await h.iron.allStates()).b?.status).toBe('ready');
+  });
+
+  it('an account that needs sign-in is AUTH_REQUIRED (401) naming it', async () => {
+    await put('a', 0);
+    await put('b', 1, { status: 'unauthenticated' });
+    const { res, body } = await pickById('provider=anthropic&profileId=b');
+    expect(res.status).toBe(401);
+    expect(body.iron).toMatchObject({
+      code: 'AUTH_REQUIRED',
+      details: { profileId: 'b', title: 'T b' },
+    });
+    expect(body.iron.hint).toContain('iron-proxy login b');
+  });
+
+  it('an unknown id is PROFILE_NOT_FOUND (404); an empty one is a 400', async () => {
+    await put('a', 0);
+    const { res, body } = await pickById('provider=anthropic&profileId=nope');
+    expect(res.status).toBe(404);
+    expect(body.iron).toMatchObject({ code: 'PROFILE_NOT_FOUND', details: { profileId: 'nope' } });
+    const empty = await pickById('provider=anthropic&profileId=');
+    expect(empty.res.status).toBe(400);
+    expect(empty.body.iron.code).toBe('INVALID_REQUEST');
   });
 });
 
@@ -269,6 +385,24 @@ describe('HttpIronClient external-executor methods', () => {
     expect(e2.hint).toBeTruthy();
     expect(await client.signal('a', { status: 403, text: 'Request not allowed' })).toEqual({
       parked: false,
+    });
+
+    await put('b', 1);
+    const byId = await client.pick('anthropic', { profileId: 'b' });
+    expect(byId.profile.id).toBe('b');
+    expect(byId.env?.set.CLAUDE_CONFIG_DIR).toBe(join(h.dir, 'b'));
+    const e3 = (await client
+      .pick('anthropic', { profileId: 'a' })
+      .catch((x: unknown) => x)) as HttpIronClientError;
+    expect(e3).toMatchObject({ status: 429, code: 'QUOTA_EXCEEDED' });
+    expect(typeof e3.details.resetAt).toBe('string');
+    await expect(client.pick('anthropic', { profileId: 'zz' })).rejects.toMatchObject({
+      status: 404,
+      code: 'PROFILE_NOT_FOUND',
+    });
+    await expect(client.pick('anthropic', { profileId: '' })).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_REQUEST',
     });
   });
 });

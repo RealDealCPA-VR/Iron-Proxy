@@ -221,6 +221,40 @@ export class AllProfilesExhaustedError extends IronProxyError {
   }
 }
 
+/**
+ * The one account a caller asked for by id is parked (`pickProfile` with
+ * `profileId` and `requireUsable`). Code `QUOTA_EXCEEDED`, like a strict
+ * request on a parked account: Iron-Proxy did not pick another one.
+ */
+export class ProfileParkedError extends IronProxyError {
+  readonly profileId: string;
+  readonly resetAt: string | undefined;
+  constructor(
+    profile: { id: string; title: string; provider: ProviderId },
+    resetAt: string | undefined,
+    kind?: string,
+  ) {
+    const until = resetAt ? ` until ${resetAt}` : '';
+    const wait = resetAt
+      ? `Wait until ${localTime(resetAt)} for "${profile.title}" to reset`
+      : `Wait for "${profile.title}" to reset`;
+    super('QUOTA_EXCEEDED', `Profile "${profile.title}" is parked${until}.`, {
+      retryable: true,
+      details: {
+        profileId: profile.id,
+        title: profile.title,
+        provider: profile.provider,
+        ...(resetAt ? { resetAt } : {}),
+        ...(kind ? { kind } : {}),
+      },
+      hint: `${wait}, or pick without a profile id so the next ready ${profile.provider} account is used.`,
+    });
+    this.name = 'ProfileParkedError';
+    this.profileId = profile.id;
+    this.resetAt = resetAt;
+  }
+}
+
 export class ProviderError extends IronProxyError {
   readonly status: number | undefined;
   constructor(

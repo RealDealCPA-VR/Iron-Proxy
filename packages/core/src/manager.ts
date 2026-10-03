@@ -31,6 +31,7 @@ import {
   IronProxyError,
   NoProfileError,
   ProfileNotFoundError,
+  ProfileParkedError,
 } from './errors.js';
 import { TypedEmitter, type IronEmitter } from './events.js';
 import { createDefaultRegistry } from './adapters/index.js';
@@ -675,7 +676,12 @@ export class IronProxy {
    * on `lane` (default `cli`; `any` for every lane), not parked (a park whose
    * cooldown has passed is cleared, exactly as the router does), not signed out,
    * lowest order. With `profileId`, that profile, if it is an enabled account of
-   * that provider on that lane.
+   * that provider on that lane (INVALID_REQUEST otherwise; PROFILE_NOT_FOUND for
+   * an unknown id). It is returned even when parked or signed out (the caller
+   * chose it), unless `requireUsable` is set: then a parked one throws
+   * ProfileParkedError (`QUOTA_EXCEEDED`, details.resetAt), a signed-out one
+   * AuthRequiredError, and one whose lane has no handler `UNSUPPORTED`; never
+   * another account.
    *
    * Throws NoProfileError when there is no such account, AllProfilesExhaustedError
    * (with the earliest reset) when the rest are parked, and AuthRequiredError when
@@ -683,7 +689,7 @@ export class IronProxy {
    */
   async pickProfile(
     provider: ProviderId,
-    opts: { profileId?: string; lane?: LaneKind | 'any' } = {},
+    opts: { profileId?: string; lane?: LaneKind | 'any'; requireUsable?: boolean } = {},
   ): Promise<Profile> {
     if (!PROVIDER_IDS.includes(provider))
       throw new IronProxyError('INVALID_REQUEST', `Unknown provider "${provider}".`, {
@@ -707,8 +713,28 @@ export class IronProxy {
           details: { profileId: p.id },
           hint: `Enable it first: iron-proxy profiles enable ${p.id}.`,
         });
-      await this.router.availability(p, { profileId: p.id });
-      return p;
+      if (!opts.requireUsable) {
+        await this.router.availability(p, { profileId: p.id });
+        return p;
+      }
+      // Unpinned availability: a signed-out account is unusable here, as in a pick.
+      const { usable, state } = await this.router.availability(p);
+      if (usable) return p;
+      if (state.status === 'parked')
+        throw new ProfileParkedError(p, state.parkedUntil, state.parkedReason?.kind);
+      if (state.status === 'unauthenticated')
+        throw new AuthRequiredError(p.id, `Profile "${p.title}" needs to log in again.`, {
+          title: p.title,
+          lane: p.lane,
+        });
+      throw new IronProxyError(
+        'UNSUPPORTED',
+        `Profile "${p.title}" uses the ${p.lane} lane, which nothing here can run.`,
+        {
+          details: { profileId: p.id, lane: p.lane },
+          hint: `Register a ${p.lane} lane for ${p.provider} (registry.addLane()), or pick a cli account.`,
+        },
+      );
     }
     const candidates = (await this.router.candidates(provider)).filter(onLane);
     if (!candidates.length) throw new NoProfileError(provider);

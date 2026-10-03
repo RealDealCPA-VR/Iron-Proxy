@@ -63,8 +63,10 @@ export const PROXY_VERSION: string =
  * Capabilities `GET /iron/health` advertises, so a host can tell this proxy from
  * an older one with the same version number. `executor-v1`: `GET /iron/pick`,
  * `POST /iron/profiles/:id/signal` and `POST /iron/profiles/:id/finished`.
+ * `pick-profile`: `GET /iron/pick` takes `profileId` and answers that account or
+ * an error saying why it cannot be used, never another account.
  */
-export const PROXY_FEATURES: readonly string[] = ['executor-v1'];
+export const PROXY_FEATURES: readonly string[] = ['executor-v1', 'pick-profile'];
 
 type Dialect = 'openai' | 'anthropic' | 'json';
 
@@ -100,7 +102,8 @@ export function statusForCode(code: string): number {
 }
 
 function retryAfterSeconds(details: Record<string, unknown> | undefined): number | undefined {
-  const at = details?.earliestResetAt;
+  // `resetAt` alone: one parked account picked by id (ProfileParkedError).
+  const at = details?.earliestResetAt ?? details?.resetAt;
   if (typeof at !== 'string') return undefined;
   const ms = new Date(at).getTime() - Date.now();
   if (Number.isNaN(ms)) return undefined;
@@ -506,8 +509,16 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
       const lane = q.get('lane') || 'cli';
       if (!LANES.includes(lane))
         throw new HttpError(400, `\`lane\` must be one of ${LANES.join(', ')}, not "${lane}".`);
+      const profileId = q.get('profileId');
+      if (profileId === '')
+        throw new HttpError(
+          400,
+          '`profileId` is empty: leave it out to pick the next ready account.',
+        );
+      // With profileId: that account or an error saying why not, never another one.
       const profile = await iron.pickProfile(provider as ProviderId, {
         lane: lane as LaneKind | 'any',
+        ...(profileId !== null ? { profileId, requireUsable: true } : {}),
       });
       const env = profile.lane === 'cli' ? await iron.shellEnv(profile.id) : null;
       return send(res, 200, { profile, env }, h);

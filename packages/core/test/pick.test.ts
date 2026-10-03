@@ -11,6 +11,7 @@ import {
   MemoryStateStore,
   MemoryVault,
   NoProfileError,
+  ProfileParkedError,
   which,
   candidateExtensions,
   type IronEvent,
@@ -152,6 +153,62 @@ describe('IronProxy.pickProfile', () => {
     await expect(iron.pickProfile('anthropic', { profileId: 'nope' })).rejects.toMatchObject({
       code: 'PROFILE_NOT_FOUND',
     });
+  });
+
+  it('with profileId and requireUsable refuses a parked, signed-out or unrunnable account, never picking another', async () => {
+    await put('a', 0);
+    await put('b', 1);
+    await put('c', 2);
+    await put('oa', 3, { lane: 'oauth' });
+    const until = later(600_000);
+    await iron.states.put({
+      profileId: 'b',
+      status: 'parked',
+      served: 0,
+      parkedUntil: until,
+      parkedReason: { kind: 'quota-exhausted', source: 'cli-output', resetAt: until },
+    });
+    await setState('c', 'unauthenticated');
+    const pin = (profileId: string, lane?: LaneKind | 'any') =>
+      iron
+        .pickProfile('anthropic', { profileId, requireUsable: true, ...(lane ? { lane } : {}) })
+        .catch((x: unknown) => x);
+
+    expect(((await pin('a')) as Profile).id).toBe('a');
+
+    const parked = await pin('b');
+    expect(parked).toBeInstanceOf(ProfileParkedError);
+    expect(parked).toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      retryable: true,
+      resetAt: until,
+      details: {
+        profileId: 'b',
+        title: 'T b',
+        provider: 'anthropic',
+        resetAt: until,
+        kind: 'quota-exhausted',
+      },
+    });
+    expect((parked as ProfileParkedError).hint).toContain('pick without a profile id');
+
+    const signedOut = await pin('c');
+    expect(signedOut).toBeInstanceOf(AuthRequiredError);
+    expect(signedOut).toMatchObject({ details: { profileId: 'c', title: 'T c' } });
+
+    expect(await pin('oa', 'any')).toMatchObject({
+      code: 'UNSUPPORTED',
+      details: { profileId: 'oa', lane: 'oauth' },
+    });
+
+    // Without requireUsable the chosen account still comes back (the CLI notes its state).
+    expect((await iron.pickProfile('anthropic', { profileId: 'b' })).id).toBe('b');
+    expect((await iron.pickProfile('anthropic', { profileId: 'c' })).id).toBe('c');
+
+    // A park whose reset has passed is cleared, exactly as a request clears it.
+    now += 601_000;
+    expect(((await pin('b')) as Profile).id).toBe('b');
+    expect((await iron.allStates()).b).toMatchObject({ status: 'ready' });
   });
 
   it('interactiveCommand and shellEnv use the scrubbed lane env and never expose PATH or API keys', async () => {

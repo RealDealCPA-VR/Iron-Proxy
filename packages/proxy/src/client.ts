@@ -202,9 +202,18 @@ export class HttpIronClient implements IronClient {
    * environment that runs its vendor CLI as that account (`env` is null for a
    * non-cli pick). Throws `HttpIronClientError` with code `NO_PROFILE`,
    * `ALL_PROFILES_EXHAUSTED` (details.resetAt) or `AUTH_REQUIRED` (details.profileId).
+   *
+   * With `profileId`, that account or an error, never another one (proxy feature
+   * `pick-profile`): `PROFILE_NOT_FOUND`, `INVALID_REQUEST` (another provider or
+   * lane, or disabled), `QUOTA_EXCEEDED` (parked; details.resetAt) or
+   * `AUTH_REQUIRED` (needs sign-in).
    */
-  pick(provider: ProviderId, opts: { lane?: LaneKind | 'any' } = {}): Promise<PickResult> {
+  pick(
+    provider: ProviderId,
+    opts: { lane?: LaneKind | 'any'; profileId?: string } = {},
+  ): Promise<PickResult> {
     const q = new URLSearchParams({ provider, lane: opts.lane ?? 'cli' });
+    if (opts.profileId !== undefined) q.set('profileId', opts.profileId);
     return this.call('GET', `/iron/pick?${q.toString()}`);
   }
   /** Report a failed attempt; Iron-Proxy classifies it and parks the account on a quota signal. */
