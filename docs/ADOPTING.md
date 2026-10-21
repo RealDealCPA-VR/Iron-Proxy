@@ -163,7 +163,7 @@ To use an account from the user's own terminal:
 
 Some hosts already drive the vendor CLI themselves (their own streaming, tools and images) and want Iron-Proxy only as the **account manager**: which accounts exist, their order, who is parked until when, sign-in and usage. They ask Iron-Proxy which account to use, run the CLI as that account, and report what happened. Same provider only: Iron-Proxy never answers with another provider's account.
 
-**Check `features` before using the executor API.** `GET /iron/health` (no token needed) answers `{ "ok": true, "name": "iron-proxy", "profiles": n, "version": "x.y.z", "features": ["executor-v1", "pick-profile"] }`. Use the three routes below only when `features` contains `executor-v1`: an older Iron-Proxy (a tray app or `serve` built before them) can report the same `version` but has no `features` and answers `/iron/pick` with a 404. Treat a missing `features` as "not supported", not as an error. Pass `profileId` to `/iron/pick` only when `features` also contains `pick-profile`: a proxy without it ignores `profileId` and answers the next ready account.
+**Check `features` before using the executor API.** `GET /iron/health` (no token needed) answers `{ "ok": true, "name": "iron-proxy", "profiles": n, "version": "x.y.z", "features": ["executor-v1", "pick-profile", "pick-pinned", "plan-usage"] }`. Use the three routes below only when `features` contains `executor-v1`: an older Iron-Proxy (a tray app or `serve` built before them) can report the same `version` but has no `features` and answers `/iron/pick` with a 404. Treat a missing `features` as "not supported", not as an error. Pass `profileId` to `/iron/pick` only when `features` also contains `pick-profile`: a proxy without it ignores `profileId` and answers the next ready account. Pass `pinned=1` only when `features` contains `pick-pinned` (an older proxy ignores it), and expect `plan` / `windows` on account states, and send `rateLimits` / `headers` on reports, only when it contains `plan-usage` (an older proxy ignores the extra fields).
 
 1. **Pick.** `GET /iron/pick?provider=anthropic[&lane=cli]` (`lane` is `cli` by default; also `api-key`, `oauth`, `any`) answers `200 { "profile": Profile, "env": { "set": { "CLAUDE_CONFIG_DIR": "<abs path>" }, "unset": ["ANTHROPIC_API_KEY", …] } }`: the account a request would use right now (`iron.pickProfile`, expired parks cleared exactly as a request clears them) and the variables that run its vendor CLI as that account (`iron.shellEnv`: the home variable and the profile's `cli.env`; `unset` lists the API-key variables to remove from the child's environment so a stray key cannot bypass the subscription). `env` is `null` when the pick is not a cli account.
 
@@ -180,11 +180,41 @@ Some hosts already drive the vendor CLI themselves (their own streaming, tools a
 
    A park whose reset has passed is cleared and the account answered, exactly as a request clears it. An empty `profileId=` is a 400 `INVALID_REQUEST` (leave it out to get the next ready account).
 
-2. **Run** the vendor CLI with that environment.
-3. **Report a failure:** `POST /iron/profiles/:id/signal` with `{ "status"?: number, "headers"?: { "<lowercase name>": "value" }, "text"?: string }`. Iron-Proxy classifies it with its own detectors (`detectFromHttp` when `status` is given, otherwise `detectFromCliOutput` on `text`) and, on a quota signal, parks the account through the router's own park path (the same `profile.parked` event, usage park record and state as an internal park; `auth-expired` leaves it `unauthenticated`, which is "needs sign-in"). Answers `{ "parked": true, "signal": { "kind", "resetAt"?, "message"?, … }, "state": ProfileState }` or `{ "parked": false }` (a model-access 403 or any error that is not about the account). Hand over the raw status, the `retry-after` / `anthropic-ratelimit-*` / `x-ratelimit-*` headers and the body or CLI text; let Iron-Proxy decide. Then pick again: the next account of the same provider comes back, or one of the errors below.
-4. **Report a success:** `POST /iron/profiles/:id/finished` with `{ "usage"?: { "inputTokens": int, "outputTokens": int, "cacheReadTokens"?: int }, "durationMs"?: int, "model"?: string }`. Recorded exactly like a request Iron-Proxy ran: the account becomes its provider's `active`, `served` increments, `request.finished` is emitted (with `model` when given) and a usage record is appended. Answers `{ "ok": true, "state": ProfileState }`.
+   **Pinned:** add `&pinned=1` when the account is the only one this work may run on (a session the user started on "Work Max"). The answers are exactly those of the table above; the difference is that a pinned pick **without** `profileId` (or with an empty one) is a 400 `INVALID_REQUEST`, so a host that lost track of the account id gets an error instead of the next ready account. `pinned=0` / `pinned=false` is the same as leaving it out; any other value is a 400.
 
-All three need the bearer token. In Node the same calls are `iron.pickProfile()` + `iron.shellEnv()`, `iron.reportSignal(id, input)` and `iron.reportFinished(id, input)`; over HTTP from TypeScript, `HttpIronClient.pick(provider, { lane?, profileId? })`, `.signal(id, input)` and `.finished(id, input)`. They are deliberately **not** part of the `IronClient` interface (the switcher, the Electron bridge and the React package do not use them).
+2. **Run** the vendor CLI with that environment.
+3. **Report a failure:** `POST /iron/profiles/:id/signal` with `{ "status"?: number, "headers"?: { "<lowercase name>": "value" }, "text"?: string, "rateLimits"?: object }`. Iron-Proxy classifies it with its own detectors (`detectFromHttp` when `status` is given, otherwise `detectFromCliOutput` on `text`) and, on a quota signal, parks the account through the router's own park path (the same `profile.parked` event, usage park record and state as an internal park; `auth-expired` leaves it `unauthenticated`, which is "needs sign-in"). Answers `{ "parked": true, "signal": { "kind", "resetAt"?, "message"?, … }, "state": ProfileState }` or `{ "parked": false }` (a model-access 403 or any error that is not about the account). Hand over the raw status, the `retry-after` / `anthropic-ratelimit-*` / `x-ratelimit-*` headers and the body or CLI text; let Iron-Proxy decide. Then pick again: the next account of the same provider comes back, or one of the errors below. A limit whose text and headers name no reset parks until the reset of the window the same report's `rateLimits` / headers say is used up (100% or more), when there is one.
+4. **Report a success:** `POST /iron/profiles/:id/finished` with `{ "usage"?: { "inputTokens": int, "outputTokens": int, "cacheReadTokens"?: int }, "durationMs"?: int, "model"?: string, "headers"?: { "<lowercase name>": "value" }, "rateLimits"?: object }`. Recorded exactly like a request Iron-Proxy ran: the account becomes its provider's `active`, `served` increments, `request.finished` is emitted (with `model` when given) and a usage record is appended. Answers `{ "ok": true, "state": ProfileState }`.
+
+**Plan and usage windows (`plan-usage`).** Both reports teach Iron-Proxy what the vendor said about the account, and its state (`GET /iron/states`, the `state` in both answers, `profile.state` events) carries it:
+
+```jsonc
+{
+  "profileId": "prof_…",
+  "status": "active",
+  "plan": "max", // the vendor's own word, lowercase; absent until a source said it
+  "planSource": "cli-status", // or "rate-limits"
+  "planAt": "2026-10-21T16:00:00.000Z",
+  "windows": [
+    // the latest reading per kind; a window whose reset has passed is left out
+    {
+      "kind": "7d",
+      "usedPercent": 38,
+      "windowMins": 10080,
+      "resetsAt": "2026-10-24T16:12:00.000Z",
+      "source": "headers",
+      "at": "2026-10-21T16:00:00.000Z",
+    },
+  ],
+}
+```
+
+- **Claude:** forward the response headers (`headers` on `/finished` as on `/signal`). Iron-Proxy reads `anthropic-ratelimit-unified-5h-utilization` / `-5h-reset` (kind `5h`, 300 minutes) and `-7d-utilization` / `-7d-reset` (kind `7d`, 10080 minutes): utilization is a 0..1 fraction, the reset unix seconds, the way Claude Code itself reads them (Claude Code 2.1.306; these headers are not in Anthropic's public API docs). Any other header on `/finished` is ignored. The plan comes from Claude Code's own `claude auth status` (`subscriptionType`: `max`, `pro`, `team`, `enterprise`), which `POST /iron/refresh` already runs: no model call, and the email and organisation in the same output are never kept. A serving or parked account is not re-judged by a refresh; its status command runs only while its plan is unknown, and only the plan is kept.
+- **Codex:** send the account's rate-limit snapshot from `codex app-server` (`account/rateLimits/read` or `account/rateLimits/updated`) as `rateLimits`: `{ "planType"?: string, "primary"?: { "usedPercent": number, "windowDurationMins"?: number, "resetsAt"?: unix seconds }, "secondary"?: {…}, "observedAt"?: unix seconds }`. Only those fields are read (credits, limit ids and the rest are ignored). Kinds are `primary` / `secondary`. `observedAt` orders readings (an older snapshot never replaces a newer one); without it, or when it is in the future or more than 30 days old, the time Iron-Proxy received the report is used.
+- Never estimated: a window whose percentage cannot be read (missing, not a number, below 0 or above 150) is absent, and an unreadable reset or length is left out of its window. `rateLimits` that is not an object is a 400 (`null` is read as "no snapshot"); an unreadable field inside it is skipped, so a report is never refused because a vendor's snapshot changed shape.
+- Signing out (`POST /iron/profiles/:id/logout`) or completing a sign-in through Iron-Proxy forgets the plan and windows.
+
+All three need the bearer token. In Node the same calls are `iron.pickProfile()` + `iron.shellEnv()`, `iron.reportSignal(id, input)` and `iron.reportFinished(id, input)`; over HTTP from TypeScript, `HttpIronClient.pick(provider, { lane?, profileId?, pinned? })`, `.signal(id, input)` and `.finished(id, input)`. They are deliberately **not** part of the `IronClient` interface (the switcher, the Electron bridge and the React package do not use them).
 
 **Errors.** Every `/iron/*` error is `status` + `{ "error": { "message", "code" }, "iron": { "code", "retryable", "details", "hint"? } }`. Read `iron.code`; `iron.hint` is one sentence for the user.
 
@@ -194,7 +224,7 @@ All three need the bearer token. In Node the same calls are `iron.pickProfile()`
 | `ALL_PROFILES_EXHAUSTED` | 429    | every such account is parked (also a `retry-after`)                      | `{ provider, resetAt?, earliestResetAt?, tried }` (`resetAt` = ISO)    |
 | `AUTH_REQUIRED`          | 401    | the rest need sign-in (`profileId` / `title` of the first)               | `{ profileId, title? }`                                                |
 | `AUTH_REQUIRED`          | 401    | the bearer token is missing or wrong                                     | `{}` (no `profileId`: tell this apart from an account needing sign-in) |
-| `INVALID_REQUEST`        | 400    | missing/unknown provider or lane, a bad body                             | varies                                                                 |
+| `INVALID_REQUEST`        | 400    | missing/unknown provider or lane, a bad body, `pinned=1` without an id   | varies                                                                 |
 | `PROFILE_NOT_FOUND`      | 404    | `:id` (or a pick's `profileId`) does not exist                           | `{ profileId }`                                                        |
 | `QUOTA_EXCEEDED`         | 429    | the account a pick named by `profileId` is parked (also a `retry-after`) | `{ profileId, title, provider, resetAt?, kind? }`                      |
 

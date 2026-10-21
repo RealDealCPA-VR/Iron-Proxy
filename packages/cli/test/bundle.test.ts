@@ -89,6 +89,8 @@ describe('single-file bundle', () => {
       expect(health.version).toBe(pkg.version);
       expect(health.features).toContain('executor-v1');
       expect(health.features).toContain('pick-profile');
+      expect(health.features).toContain('pick-pinned');
+      expect(health.features).toContain('plan-usage');
       const res = await fetch(`${desc!.url}/iron/pick?provider=anthropic`, {
         headers: { authorization: `Bearer ${desc!.token}` },
       });

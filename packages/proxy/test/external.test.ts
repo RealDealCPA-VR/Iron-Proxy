@@ -66,7 +66,7 @@ async function put(
 type IronBody = { iron: { code: string; details: Record<string, unknown>; hint?: string } };
 
 describe('GET /iron/health advertises the executor API', () => {
-  it('answers version and features (executor-v1, pick-profile) without a token', async () => {
+  it('answers version and features (executor-v1, pick-profile, pick-pinned, plan-usage) without a token', async () => {
     const pkg = JSON.parse(
       await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
     ) as { version: string };
@@ -77,7 +77,7 @@ describe('GET /iron/health advertises the executor API', () => {
       name: 'iron-proxy',
       profiles: 0,
       version: pkg.version,
-      features: ['executor-v1', 'pick-profile'],
+      features: ['executor-v1', 'pick-profile', 'pick-pinned', 'plan-usage'],
     });
   });
 });
@@ -272,6 +272,163 @@ describe('GET /iron/pick?profileId=', () => {
   });
 });
 
+describe('GET /iron/pick?profileId=&pinned=1', () => {
+  type Body = IronBody & {
+    error?: { message: string; code: string };
+    profile?: Profile;
+    env?: unknown;
+  };
+  const pick = async (q: string) => {
+    const res = await get(`/iron/pick?${q}`);
+    return { res, text: await res.text() };
+  };
+  /** The answer with and without pinned=1: same status, same body, same retry-after. */
+  const same = async (q: string) => {
+    const plain = await pick(q);
+    const pinned = await pick(`${q}&pinned=1`);
+    expect(pinned.res.status, q).toBe(plain.res.status);
+    expect(pinned.text, q).toBe(plain.text);
+    expect(pinned.res.headers.get('retry-after') !== null, q).toBe(
+      plain.res.headers.get('retry-after') !== null,
+    );
+    return { status: pinned.res.status, body: JSON.parse(pinned.text) as Body };
+  };
+
+  it('answers that usable account, never the one that comes first', async () => {
+    await put('a', 0);
+    await put('b', 1);
+    const { status, body } = await same('provider=anthropic&profileId=b');
+    expect(status).toBe(200);
+    expect(body.profile?.id).toBe('b');
+    expect(body).toMatchObject({ env: { set: { CLAUDE_CONFIG_DIR: join(h.dir, 'b') } } });
+  });
+
+  it('a parked account answers its park (QUOTA_EXCEEDED, resetAt, kind), never the next account', async () => {
+    const until = new Date(Date.now() + 600_000).toISOString();
+    await put('a', 0);
+    await put('b', 1, {
+      status: 'parked',
+      until,
+      reason: { kind: 'quota-exhausted', source: 'cli-output', resetAt: until },
+    });
+    const { status, body } = await same('provider=anthropic&profileId=b');
+    expect(status).toBe(429);
+    expect(body.profile).toBeUndefined();
+    expect(body.iron).toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { profileId: 'b', resetAt: until, kind: 'quota-exhausted' },
+    });
+  });
+
+  it('sign-in, unknown, disabled and another provider answer exactly as a profileId pick', async () => {
+    await put('a', 0);
+    await put('u', 1, { status: 'unauthenticated' });
+    await put('off', 2, { enabled: false });
+    await put('o', 0, { provider: 'openai' });
+    const cases: Array<[string, number, string]> = [
+      ['provider=anthropic&profileId=u', 401, 'AUTH_REQUIRED'],
+      ['provider=anthropic&profileId=nope', 404, 'PROFILE_NOT_FOUND'],
+      ['provider=anthropic&profileId=off', 400, 'INVALID_REQUEST'],
+      ['provider=anthropic&profileId=o', 400, 'INVALID_REQUEST'],
+    ];
+    for (const [q, status, code] of cases) {
+      const r = await same(q);
+      expect(r.status, q).toBe(status);
+      expect(r.body.iron.code, q).toBe(code);
+    }
+  });
+
+  it('pinned=1 without profileId is a 400, never the next ready account', async () => {
+    await put('a', 0);
+    for (const q of ['provider=anthropic&pinned=1', 'provider=anthropic&pinned=true']) {
+      const res = await get(`/iron/pick?${q}`);
+      expect(res.status, q).toBe(400);
+      const body = (await res.json()) as Body;
+      expect(body.profile, q).toBeUndefined();
+      expect(body.iron.code, q).toBe('INVALID_REQUEST');
+    }
+    expect((await get('/iron/pick?provider=anthropic&pinned=1&profileId=')).status).toBe(400);
+  });
+
+  it('pinned=0 (or false) is the plain pick; any other value is a 400', async () => {
+    await put('a', 0);
+    await put('b', 1);
+    const plain = await pick('provider=anthropic');
+    for (const v of ['0', 'false']) {
+      const r = await pick(`provider=anthropic&pinned=${v}`);
+      expect(r.res.status, v).toBe(200);
+      expect(r.text, v).toBe(plain.text);
+    }
+    for (const v of ['', 'yes', '2']) {
+      const res = await get(`/iron/pick?provider=anthropic&profileId=b&pinned=${v}`);
+      expect(res.status, v).toBe(400);
+      expect(((await res.json()) as Body).iron.code, v).toBe('INVALID_REQUEST');
+    }
+  });
+});
+
+describe('plan and usage windows over HTTP', () => {
+  it('finished with rateLimits / headers shows plan and windows in its state and GET /iron/states', async () => {
+    await put('o', 0, { provider: 'openai' });
+    await put('a', 1);
+    const resets = Math.floor(Date.now() / 1000) + 86_400;
+    const res = await post('/iron/profiles/o/finished', {
+      usage: { inputTokens: 2, outputTokens: 1 },
+      rateLimits: {
+        planType: 'plus',
+        primary: { usedPercent: 7, windowDurationMins: 300, resetsAt: resets },
+        secondary: { usedPercent: 38, windowDurationMins: 10_080, resetsAt: resets },
+        credits: { hasCredits: true, unlimited: false, balance: '12' },
+      },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: true; state: Record<string, unknown> };
+    expect(body.state).toMatchObject({
+      status: 'active',
+      plan: 'plus',
+      planSource: 'rate-limits',
+      windows: [
+        { kind: 'primary', usedPercent: 7, windowMins: 300, source: 'rate-limits' },
+        { kind: 'secondary', usedPercent: 38, windowMins: 10_080, source: 'rate-limits' },
+      ],
+    });
+    expect(JSON.stringify(body)).not.toContain('balance');
+    const claude = await post('/iron/profiles/a/finished', {
+      headers: {
+        'anthropic-ratelimit-unified-7d-utilization': '0.25',
+        'anthropic-ratelimit-unified-7d-reset': String(resets),
+      },
+    });
+    expect(claude.status).toBe(200);
+    const states = (await (await get('/iron/states')).json()) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(states.o).toMatchObject({
+      plan: 'plus',
+      windows: [{ kind: 'primary' }, { kind: 'secondary' }],
+    });
+    expect(states.a).toMatchObject({
+      windows: [{ kind: '7d', usedPercent: 25, windowMins: 10_080 }],
+    });
+  });
+
+  it('a non-object rateLimits is a 400 and records nothing', async () => {
+    await put('o', 0, { provider: 'openai' });
+    for (const rateLimits of ['plus', [1], 7]) {
+      const res = await post('/iron/profiles/o/finished', { rateLimits });
+      expect(res.status, JSON.stringify(rateLimits)).toBe(400);
+      const sig = await post('/iron/profiles/o/signal', { text: 'limit reached', rateLimits });
+      expect(sig.status, JSON.stringify(rateLimits)).toBe(400);
+    }
+    expect((await h.iron.allStates()).o).toMatchObject({ status: 'ready', served: 0 });
+    // `rateLimits: null` is no snapshot: the report counts.
+    const ok = await post('/iron/profiles/o/finished', { rateLimits: null });
+    expect(ok.status).toBe(200);
+    expect((await h.iron.allStates()).o).toMatchObject({ status: 'active', served: 1 });
+  });
+});
+
 describe('POST /iron/profiles/:id/signal', () => {
   it('parks on a 429 with the Anthropic reset header and emits the park', async () => {
     await put('a', 0);
@@ -401,6 +558,17 @@ describe('HttpIronClient external-executor methods', () => {
       code: 'PROFILE_NOT_FOUND',
     });
     await expect(client.pick('anthropic', { profileId: '' })).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_REQUEST',
+    });
+
+    // pinned: that account, its park, or a 400 when no account is named.
+    expect((await client.pick('anthropic', { profileId: 'b', pinned: true })).profile.id).toBe('b');
+    await expect(client.pick('anthropic', { profileId: 'a', pinned: true })).rejects.toMatchObject({
+      status: 429,
+      code: 'QUOTA_EXCEEDED',
+    });
+    await expect(client.pick('anthropic', { pinned: true })).rejects.toMatchObject({
       status: 400,
       code: 'INVALID_REQUEST',
     });

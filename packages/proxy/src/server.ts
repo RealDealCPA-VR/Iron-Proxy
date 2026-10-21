@@ -65,8 +65,18 @@ export const PROXY_VERSION: string =
  * `POST /iron/profiles/:id/signal` and `POST /iron/profiles/:id/finished`.
  * `pick-profile`: `GET /iron/pick` takes `profileId` and answers that account or
  * an error saying why it cannot be used, never another account.
+ * `pick-pinned`: `GET /iron/pick` takes `pinned=1`, which requires `profileId` (a
+ * pinned pick that names no account is a 400, never the next ready account).
+ * `plan-usage`: account states carry `plan` / `planSource` / `planAt` and
+ * `windows`, and signal / finished reports take `rateLimits` (and finished takes
+ * `headers`) to learn them.
  */
-export const PROXY_FEATURES: readonly string[] = ['executor-v1', 'pick-profile'];
+export const PROXY_FEATURES: readonly string[] = [
+  'executor-v1',
+  'pick-profile',
+  'pick-pinned',
+  'plan-usage',
+];
 
 type Dialect = 'openai' | 'anthropic' | 'json';
 
@@ -515,6 +525,14 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
           400,
           '`profileId` is empty: leave it out to pick the next ready account.',
         );
+      // pinned=1: the caller means one account only. Without profileId that is a
+      // mistake (it would otherwise be handed the next ready account), so it is refused.
+      const pinned = pinnedFlag(q.get('pinned'));
+      if (pinned && profileId === null)
+        throw new HttpError(
+          400,
+          '`pinned=1` needs `profileId`: a pinned pick answers that one account, never the next ready one.',
+        );
       // With profileId: that account or an error saying why not, never another one.
       const profile = await iron.pickProfile(provider as ProviderId, {
         lane: lane as LaneKind | 'any',
@@ -680,6 +698,15 @@ export function createProxyServer(opts: ProxyServerOptions): ProxyServer {
 /** The SSE comment frame announcing a switch; `resumed` when the answer continues on the new account. */
 function switchedComment(ev: Extract<StreamEvent, { type: 'switched' }>): string {
   return `: iron switched ${ev.fromProfileId} -> ${ev.toProfileId}${ev.resumed ? ' resumed' : ''}\n\n`;
+}
+
+/** `pinned` on `/iron/pick`: absent or 0/false is off, 1/true is on, anything else a 400. */
+function pinnedFlag(raw: string | null): boolean {
+  if (raw === null) return false;
+  const v = raw.trim().toLowerCase();
+  if (v === '1' || v === 'true') return true;
+  if (v === '0' || v === 'false') return false;
+  throw new HttpError(400, `\`pinned\` must be 1 or 0, not "${raw}".`);
 }
 
 function isSerialized(err: unknown): err is SerializedError {

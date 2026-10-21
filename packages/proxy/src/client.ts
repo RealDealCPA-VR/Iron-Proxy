@@ -207,13 +207,18 @@ export class HttpIronClient implements IronClient {
    * `pick-profile`): `PROFILE_NOT_FOUND`, `INVALID_REQUEST` (another provider or
    * lane, or disabled), `QUOTA_EXCEEDED` (parked; details.resetAt) or
    * `AUTH_REQUIRED` (needs sign-in).
+   *
+   * `pinned` (proxy feature `pick-pinned`) sends `pinned=1`: the proxy then refuses
+   * a pick without `profileId` (400 `INVALID_REQUEST`) instead of answering the
+   * next ready account. A proxy without the feature ignores it.
    */
   pick(
     provider: ProviderId,
-    opts: { lane?: LaneKind | 'any'; profileId?: string } = {},
+    opts: { lane?: LaneKind | 'any'; profileId?: string; pinned?: boolean } = {},
   ): Promise<PickResult> {
     const q = new URLSearchParams({ provider, lane: opts.lane ?? 'cli' });
     if (opts.profileId !== undefined) q.set('profileId', opts.profileId);
+    if (opts.pinned) q.set('pinned', '1');
     return this.call('GET', `/iron/pick?${q.toString()}`);
   }
   /** Report a failed attempt; Iron-Proxy classifies it and parks the account on a quota signal. */
