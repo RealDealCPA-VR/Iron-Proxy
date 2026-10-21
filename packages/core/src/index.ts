@@ -81,6 +81,7 @@ export {
   type CliParsed,
   type CliRunInput,
   type CliSpec,
+  type CliStatusDetail,
 } from './adapters/cli/lane.js';
 export {
   claudeSpec,
@@ -106,6 +107,21 @@ export {
   usageFromHeaders,
   type HeaderGetter,
 } from './quota/detect.js';
+export {
+  applyLimits,
+  CLAUDE_USAGE_WINDOWS,
+  CLAUDE_WINDOW_HEADER_PREFIX,
+  exhaustedResetAt,
+  headerInstantMs,
+  learnLimits,
+  limitsFromRateLimits,
+  liveWindows,
+  MAX_USED_PERCENT,
+  mergeWindows,
+  normalizePlan,
+  windowsFromHeaders,
+  type LearnedLimits,
+} from './quota/limits.js';
 export * as openaiWire from './translate/openai.js';
 export * as anthropicWire from './translate/anthropic.js';
 export * as googleWire from './translate/google.js';

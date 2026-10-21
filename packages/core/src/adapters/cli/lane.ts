@@ -10,6 +10,7 @@ import type {
 } from '../../types.js';
 import { CliError, IronProxyError, ProviderError } from '../../errors.js';
 import { detectFromCliOutput } from '../../quota/detect.js';
+import { normalizePlan } from '../../quota/limits.js';
 import { newId, redactSecrets } from '../../util.js';
 import type { Vault } from '../../vault/vault.js';
 import { LaneQuotaSignal, type AttemptContext, type Lane, type LaneResponse } from '../types.js';
@@ -22,6 +23,12 @@ export type CliParsed =
   | { kind: 'usage'; usage: Usage }
   | { kind: 'error'; text: string }
   | { kind: 'ignore' };
+
+/** What a status check learned besides the sign-in verdict (CliLane.checkAuth). */
+export interface CliStatusDetail {
+  /** The subscription plan, normalized (quota/limits.ts normalizePlan). */
+  plan?: string;
+}
 
 export interface CliRunInput {
   prompt: string;
@@ -46,7 +53,16 @@ export interface CliSpec {
   login: { args: string[]; headlessArgs?: string[]; requiresTerminal?: boolean };
   logoutArgs?: string[];
   /** Cheap authentication check. */
-  status?: { args: string[]; interpret(result: RunResult): 'ok' | 'unauthenticated' | 'unknown' };
+  status?: {
+    args: string[];
+    interpret(result: RunResult): 'ok' | 'unauthenticated' | 'unknown';
+    /**
+     * The account's subscription plan when the same status output says it (no extra
+     * run), in the vendor's own word; undefined when it does not. Must never return
+     * anything else the output carries (an email, an organisation).
+     */
+    plan?(result: RunResult): string | undefined;
+  };
   modelsArgs?: string[];
   /** Turn the models command output into ids. */
   parseModels?(stdout: string): string[];
@@ -302,7 +318,16 @@ export class CliLane implements Lane {
     yield { type: 'finish', finishReason: 'stop' };
   }
 
-  async checkAuth(profile: Profile): Promise<'ok' | 'unauthenticated' | 'unknown'> {
+  /**
+   * Run the CLI's own status command. When `detail` is given and the spec reads a
+   * plan from the same output (`status.plan`), the plan is put on it; nothing else
+   * from the output is kept.
+   */
+  async checkAuth(
+    profile: Profile,
+    _vault?: Vault,
+    detail?: CliStatusDetail,
+  ): Promise<'ok' | 'unauthenticated' | 'unknown'> {
     if (!this.spec.status) return 'unknown';
     const { binary, lead } = this.exe(profile);
     if (!(await which(binary))) return 'unknown';
@@ -315,7 +340,16 @@ export class CliLane implements Lane {
         timeoutMs: 20_000,
         cwd: profile.cli!.home,
       });
-      return this.spec.status.interpret(result);
+      const verdict = this.spec.status.interpret(result);
+      if (detail && this.spec.status.plan) {
+        try {
+          const plan = normalizePlan(this.spec.status.plan(result));
+          if (plan) detail.plan = plan;
+        } catch {
+          /* a plan that cannot be read is absent; it never changes the verdict */
+        }
+      }
+      return verdict;
     } catch {
       return 'unknown';
     }

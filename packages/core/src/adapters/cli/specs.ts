@@ -129,21 +129,40 @@ export const claudeSpec: CliSpec = {
   status: {
     args: ['auth', 'status'],
     interpret(r) {
-      const j =
-        tryJson(
-          r.stdout
-            .trim()
-            .split('\n')
-            .find((l) => l.trim().startsWith('{')) ?? '',
-        ) ?? tryJson(r.stdout);
+      const j = claudeStatusJson(r.stdout);
       if (j && typeof j.loggedIn === 'boolean') return j.loggedIn ? 'ok' : 'unauthenticated';
       if (/logged in|authenticated/i.test(r.stdout) && !/not logged in/i.test(r.stdout))
         return 'ok';
       if (/not logged in|no credentials/i.test(r.stdout + r.stderr)) return 'unauthenticated';
       return 'unknown';
     },
+    /**
+     * `claude auth status` prints JSON by default (verified on Claude Code 2.1.306,
+     * 2026-10-21): `{ loggedIn, authMethod, …, subscriptionType }` with
+     * subscriptionType `max` / `pro` / `team` / `enterprise` (Claude Code's own map of
+     * claude_max / claude_pro / claude_team / claude_enterprise), or null when not
+     * signed in with a subscription. Only `subscriptionType` is read, and only while
+     * signed in; the email and organisation the same output carries are never kept.
+     */
+    plan(r) {
+      const j = claudeStatusJson(r.stdout);
+      if (!j || j.loggedIn !== true) return undefined;
+      return typeof j.subscriptionType === 'string' ? j.subscriptionType : undefined;
+    },
   },
 };
+
+/** The JSON object `claude auth status` printed, when it printed one. */
+function claudeStatusJson(stdout: string): Record<string, unknown> | undefined {
+  return (
+    tryJson(
+      stdout
+        .trim()
+        .split('\n')
+        .find((l) => l.trim().startsWith('{')) ?? '',
+    ) ?? tryJson(stdout)
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* OpenAI Codex CLI                                                    */

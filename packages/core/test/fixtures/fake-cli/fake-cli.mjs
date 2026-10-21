@@ -7,6 +7,8 @@
  *   FAKE_CLI_FLAVOR   claude | codex | grok | gemini            (default claude)
  *   FAKE_CLI_MODE     ok | quota | auth | overload | crash | slow (default ok)
  *   FAKE_CLI_MARKER   file name inside the home dir that means "logged in"
+ *   FAKE_CLI_PLAN     claude: the `subscriptionType` its `auth status` reports while
+ *                     logged in (default null), beside a fake email and organisation
  *
  * `echo-run [--exit N] ...` prints {args, homeEnv, home, keys, extra} as JSON and
  * exits with N, standing in for an interactive session (`iron-proxy run`).
@@ -81,7 +83,20 @@ const isStatus =
   args[0] === 'models';
 if (isStatus) {
   const logged = existsSync(marker);
-  if (flavor === 'claude') out({ loggedIn: logged, authMethod: logged ? 'claude.ai' : 'none' });
+  if (flavor === 'claude')
+    // The real `claude auth status` (2.1.306) also prints the account's email and
+    // organisation; the fake does too, so tests can prove they are never kept.
+    out(
+      logged
+        ? {
+            loggedIn: true,
+            authMethod: 'claude.ai',
+            email: 'someone@example.test',
+            orgName: "someone@example.test's Organization",
+            subscriptionType: process.env.FAKE_CLI_PLAN ?? null,
+          }
+        : { loggedIn: false, authMethod: 'none' },
+    );
   else if (flavor === 'codex') out(logged ? 'Logged in using ChatGPT' : 'Not logged in');
   else if (flavor === 'grok')
     out(logged ? 'Available models:\n  * grok-4 (default)' : 'You are not authenticated.');

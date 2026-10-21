@@ -6,6 +6,7 @@ import type {
   CliProbe,
   DiscoveredLogin,
   ExternalFinishedInput,
+  ExternalRateLimits,
   ExternalSignalInput,
   ExternalSignalResult,
   FailoverPolicy,
@@ -36,7 +37,7 @@ import {
 import { TypedEmitter, type IronEmitter } from './events.js';
 import { createDefaultRegistry } from './adapters/index.js';
 import type { AdapterRegistry, FetchLike } from './adapters/types.js';
-import { CliLane } from './adapters/cli/lane.js';
+import { CliLane, type CliStatusDetail } from './adapters/cli/lane.js';
 import { CLI_SPECS } from './adapters/cli/specs.js';
 import { run, which } from './adapters/cli/runner.js';
 import { Router } from './router/router.js';
@@ -46,6 +47,13 @@ import { FileUsageStore, type UsageStore } from './store/usage-store.js';
 import { buildUsageReport } from './usage/report.js';
 import { FileVault, type KeyProtector, type Vault } from './vault/vault.js';
 import { detectFromCliOutput, detectFromHttp, headersFrom } from './quota/detect.js';
+import {
+  applyLimits,
+  exhaustedResetAt,
+  learnLimits,
+  liveWindows,
+  type LearnedLimits,
+} from './quota/limits.js';
 import { isoNow, newId, redactSecrets, systemClock, type Clock } from './util.js';
 
 export interface IronProxyOptions {
@@ -583,6 +591,8 @@ export class IronProxy {
           st.status = 'ready';
           delete st.lastError;
           delete st.parkedReason;
+          // A sign-in may be another subscription: what was known about the old one goes.
+          forgetLimits(st);
           await this.states.put(st);
           this.events.emit({ type: 'profile.state', state: st });
         })
@@ -616,11 +626,18 @@ export class IronProxy {
     await lane.logout?.(p, this.vault);
     const st = await this.router.state(id);
     st.status = 'unauthenticated';
+    forgetLimits(st);
     await this.states.put(st);
     this.events.emit({ type: 'profile.state', state: st });
   }
 
-  /** Re-check authentication for one or all profiles. */
+  /**
+   * Re-check authentication for one or all profiles. A vendor CLI whose status
+   * output names the subscription plan (Claude Code) also records it on the state
+   * (`plan`, `planSource: 'cli-status'`). A parked or serving account is not
+   * re-judged; its status command runs only while its plan is still unknown, and
+   * then only the plan is kept.
+   */
   async refreshStatus(id?: string): Promise<ProfileState[]> {
     const targets = id ? [await this.getProfile(id)] : await this.listProfiles();
     const out: ProfileState[] = [];
@@ -631,7 +648,12 @@ export class IronProxy {
           st.status = 'disabled';
         } else if (st.status !== 'parked' && st.status !== 'active') {
           const lane = this.registry.laneFor(p);
-          const result = await lane.checkAuth(p, this.vault).catch(() => 'unknown' as const);
+          const detail: CliStatusDetail = {};
+          const result = await (
+            lane instanceof CliLane
+              ? lane.checkAuth(p, this.vault, detail)
+              : lane.checkAuth(p, this.vault)
+          ).catch(() => 'unknown' as const);
           // The check can take seconds (it runs the vendor CLI). Re-read the state:
           // a park or a served request may have landed meanwhile, and writing back
           // the copy read before the check would silently undo it.
@@ -646,6 +668,22 @@ export class IronProxy {
                     ? 'ready'
                     : st.status;
           }
+          this.notePlan(st, detail);
+        } else if (st.plan === undefined) {
+          // A parked account's lane may not be registered (nothing could serve it, but
+          // an external report can park it): then there is simply no plan to read.
+          let lane: unknown;
+          try {
+            lane = this.registry.laneFor(p);
+          } catch {
+            lane = undefined;
+          }
+          if (lane instanceof CliLane && lane.spec.status?.plan) {
+            const detail: CliStatusDetail = {};
+            await lane.checkAuth(p, this.vault, detail).catch(() => 'unknown' as const);
+            st = await this.router.state(p.id); // the verdict is ignored; only the plan is kept
+            this.notePlan(st, detail);
+          }
         }
         await this.states.put(st);
         this.events.emit({ type: 'profile.state', state: st });
@@ -653,6 +691,16 @@ export class IronProxy {
       }),
     );
     return out;
+  }
+
+  /** Put the plan a status check read on the state (mutated), as `cli-status`. */
+  private notePlan(st: ProfileState, detail: CliStatusDetail): void {
+    if (!detail.plan) return;
+    applyLimits(
+      st,
+      { plan: { plan: detail.plan, source: 'cli-status', at: isoNow(this.clock) }, windows: [] },
+      this.clock.now(),
+    );
   }
 
   /* ---------------------------------------------------------------- */
@@ -811,18 +859,48 @@ export class IronProxy {
    */
   async reportSignal(id: string, input: ExternalSignalInput): Promise<ExternalSignalResult> {
     const p = await this.getProfile(id);
-    const { status, headers, text } = validateSignalInput(input);
+    const { status, headers, text, rateLimits } = validateSignalInput(input);
     const now = this.clock.now();
     const found =
       status !== undefined
         ? detectFromHttp(p.provider, status, headersFrom(headers ?? {}), text, now)
         : detectFromCliOutput(p.provider, text ?? '', now);
+    // The plan and usage windows the report carried are kept whether or not it parks
+    // (stored before the park, so the parked state carries them too).
+    const learned = this.learnedFrom(p, headers, rateLimits, now);
+    await this.router.recordLimits(p.id, learned, { emit: !found });
     if (!found) return { parked: false };
     // The text came from outside: never let a key it quoted reach state, events or UI.
-    const signal: QuotaSignal =
+    let signal: QuotaSignal =
       found.message !== undefined ? { ...found, message: redactSecrets(found.message) } : found;
+    // A limit that names no reset: a window this same report says is used up says when.
+    if (
+      (signal.kind === 'rate-limit' || signal.kind === 'quota-exhausted') &&
+      signal.resetAt === undefined &&
+      signal.retryAfterMs === undefined
+    ) {
+      const resetAt = exhaustedResetAt(learned.windows, now);
+      if (resetAt) signal = { ...signal, resetAt };
+    }
     await this.router.park(p, signal);
     return { parked: true, signal, state: await this.router.state(id) };
+  }
+
+  /** The plan and usage windows one external report carried (see quota/limits.ts). */
+  private learnedFrom(
+    p: Profile,
+    headers: Record<string, string> | undefined,
+    rateLimits: ExternalRateLimits | null | undefined,
+    now: number,
+  ): LearnedLimits {
+    return learnLimits(
+      p.provider,
+      {
+        ...(headers ? { headers: headersFrom(headers) } : {}),
+        ...(rateLimits ? { rateLimits } : {}),
+      },
+      now,
+    );
   }
 
   /**
@@ -833,7 +911,12 @@ export class IronProxy {
    */
   async reportFinished(id: string, input: ExternalFinishedInput = {}): Promise<ProfileState> {
     const p = await this.getProfile(id);
-    const { usage, durationMs, model } = validateFinishedInput(input);
+    const { usage, durationMs, model, headers, rateLimits } = validateFinishedInput(input);
+    // Stored first, so the served state below (and its event) carries them.
+    await this.router.recordLimits(
+      p.id,
+      this.learnedFrom(p, headers, rateLimits, this.clock.now()),
+    );
     return this.router.recordServed(p, {
       ...(usage ? { usage } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),
@@ -845,10 +928,21 @@ export class IronProxy {
   /* State + diagnostics                                              */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Every profile's state. A usage window whose reset has passed since it was
+   * stored is left out (its percentage describes a window that is over).
+   */
   async allStates(): Promise<Record<string, ProfileState>> {
     const states = await this.states.all();
     for (const p of await this.profiles.list())
       states[p.id] ??= { profileId: p.id, status: 'unknown', served: 0 };
+    const now = this.clock.now();
+    for (const st of Object.values(states)) {
+      if (!st.windows) continue;
+      const live = liveWindows(st.windows, now);
+      if (live.length) st.windows = live;
+      else delete st.windows;
+    }
     return states;
   }
 
@@ -962,33 +1056,55 @@ function badInput(message: string): IronProxyError {
 
 const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
 
+function validateHeaders(headers: unknown): Record<string, string> | undefined {
+  if (headers === undefined) return undefined;
+  if (
+    !headers ||
+    typeof headers !== 'object' ||
+    Array.isArray(headers) ||
+    Object.values(headers).some((v) => typeof v !== 'string')
+  )
+    throw badInput('`headers` must be an object of string values.');
+  return headers as Record<string, string>;
+}
+
+/**
+ * `rateLimits` must be an object (`null` is "no snapshot"); inside it only
+ * `planType`, `primary`, `secondary` and `observedAt` are read, and a field that
+ * cannot be read is left out (a report is never refused because a vendor's
+ * snapshot changed shape).
+ */
+function validateRateLimits(rateLimits: unknown): ExternalRateLimits | undefined {
+  if (rateLimits === undefined || rateLimits === null) return undefined;
+  if (!rateLimits || typeof rateLimits !== 'object' || Array.isArray(rateLimits))
+    throw badInput('`rateLimits` must be an object (a Codex rate-limit snapshot).');
+  return rateLimits as ExternalRateLimits;
+}
+
 function validateSignalInput(input: ExternalSignalInput): ExternalSignalInput {
   if (!input || typeof input !== 'object' || Array.isArray(input))
-    throw badInput('The signal must be an object: { status?, headers?, text? }.');
-  const { status, headers, text } = input;
+    throw badInput('The signal must be an object: { status?, headers?, text?, rateLimits? }.');
+  const { status, text } = input;
   if (status !== undefined && (!Number.isInteger(status) || status < 100 || status > 599))
     throw badInput('`status` must be an HTTP status code (100-599).');
   if (text !== undefined && typeof text !== 'string') throw badInput('`text` must be a string.');
-  if (
-    headers !== undefined &&
-    (!headers ||
-      typeof headers !== 'object' ||
-      Array.isArray(headers) ||
-      Object.values(headers).some((v) => typeof v !== 'string'))
-  )
-    throw badInput('`headers` must be an object of string values.');
+  const headers = validateHeaders(input.headers);
+  const rateLimits = validateRateLimits(input.rateLimits);
   if (status === undefined && !text?.trim())
     throw badInput('A signal needs `status` (an HTTP failure) or `text` (what the CLI printed).');
   return {
     ...(status !== undefined ? { status } : {}),
     ...(headers !== undefined ? { headers } : {}),
     ...(text !== undefined ? { text } : {}),
+    ...(rateLimits !== undefined ? { rateLimits } : {}),
   };
 }
 
 function validateFinishedInput(input: ExternalFinishedInput): ExternalFinishedInput {
   if (!input || typeof input !== 'object' || Array.isArray(input))
-    throw badInput('The report must be an object: { usage?, durationMs?, model? }.');
+    throw badInput(
+      'The report must be an object: { usage?, durationMs?, model?, headers?, rateLimits? }.',
+    );
   const { usage, durationMs, model } = input;
   if (usage !== undefined) {
     if (
@@ -1005,6 +1121,8 @@ function validateFinishedInput(input: ExternalFinishedInput): ExternalFinishedIn
   if (durationMs !== undefined && !isCount(durationMs))
     throw badInput('`durationMs` must be a non-negative integer.');
   if (model !== undefined && typeof model !== 'string') throw badInput('`model` must be a string.');
+  const headers = validateHeaders(input.headers);
+  const rateLimits = validateRateLimits(input.rateLimits);
   return {
     ...(usage
       ? {
@@ -1019,7 +1137,17 @@ function validateFinishedInput(input: ExternalFinishedInput): ExternalFinishedIn
       : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(model ? { model } : {}),
+    ...(headers !== undefined ? { headers } : {}),
+    ...(rateLimits !== undefined ? { rateLimits } : {}),
   };
+}
+
+/** Drop what was learned about an account's subscription (on sign-out or a new sign-in). */
+function forgetLimits(st: ProfileState): void {
+  delete st.plan;
+  delete st.planSource;
+  delete st.planAt;
+  delete st.windows;
 }
 
 function freeTitle(base: string, taken: Set<string>): string {

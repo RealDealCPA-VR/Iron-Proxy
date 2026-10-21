@@ -1,5 +1,6 @@
 import type { ProviderId, QuotaSignal, UsageSnapshot } from '../types.js';
 import { parseDurationMs, parseResetAt } from '../util.js';
+import { headerInstantMs } from './limits.js';
 
 /** Minimal header accessor so tests and the CLI lane need no real Headers object. */
 export type HeaderGetter = (name: string) => string | null | undefined;
@@ -121,7 +122,8 @@ function resetFromHeaders(
 ): string | undefined {
   switch (provider) {
     case 'anthropic': {
-      // RFC 3339 instants. Take the furthest of the exhausted windows.
+      // RFC 3339 instants, except the subscription (`unified`) reset, which is unix
+      // seconds (headerInstantMs reads both). Take the furthest of the exhausted windows.
       const candidates = [
         headers('anthropic-ratelimit-requests-reset'),
         headers('anthropic-ratelimit-input-tokens-reset'),
@@ -131,7 +133,7 @@ function resetFromHeaders(
       ];
       let best: number | undefined;
       for (const c of candidates) {
-        const t = c ? new Date(c).getTime() : NaN;
+        const t = c ? headerInstantMs(c) : NaN;
         if (!Number.isNaN(t) && (best === undefined || t > best)) best = t;
       }
       return best !== undefined ? new Date(best).toISOString() : undefined;

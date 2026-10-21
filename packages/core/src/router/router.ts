@@ -25,6 +25,7 @@ import {
 import type { IronEmitter } from '../events.js';
 import type { AdapterRegistry, FetchLike, AttemptContext } from '../adapters/types.js';
 import { LaneQuotaSignal } from '../adapters/types.js';
+import { applyLimits, learnedNothing, liveWindows, type LearnedLimits } from '../quota/limits.js';
 import type { ProfileStore } from '../store/profile-store.js';
 import type { StateStore } from '../store/state-store.js';
 import type { Vault } from '../vault/vault.js';
@@ -589,8 +590,22 @@ export class Router {
   /* State                                                            */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * The profile's state. A usage window whose reset has passed is left out (and
+   * so dropped by the next write): its percentage describes a window that is over.
+   */
   async state(profileId: string): Promise<ProfileState> {
-    return (await this.deps.states.get(profileId)) ?? { profileId, status: 'unknown', served: 0 };
+    const st = (await this.deps.states.get(profileId)) ?? {
+      profileId,
+      status: 'unknown',
+      served: 0,
+    };
+    if (st.windows) {
+      const live = liveWindows(st.windows, this.clock.now());
+      if (!live.length) delete st.windows;
+      else if (live.length !== st.windows.length) st.windows = live;
+    }
+    return st;
   }
 
   /**
@@ -688,6 +703,26 @@ export class Router {
       ...(info.model ? { model: info.model } : {}),
     });
     return this.state(profile.id);
+  }
+
+  /**
+   * Store what a host learned about an account's plan and usage windows (see
+   * quota/limits.ts `applyLimits`), behind any usage write still in flight for it so
+   * neither overwrites the other. Emits `profile.state` when `emit` is set and
+   * something changed. Returns the stored state when something changed.
+   */
+  async recordLimits(
+    profileId: string,
+    learned: LearnedLimits,
+    opts: { emit?: boolean } = {},
+  ): Promise<ProfileState | undefined> {
+    if (learnedNothing(learned)) return undefined;
+    await this.usageWrites.get(profileId);
+    const st = await this.state(profileId);
+    if (!applyLimits(st, learned, this.clock.now())) return undefined;
+    await this.deps.states.put(st);
+    if (opts.emit) this.deps.emitter.emit({ type: 'profile.state', state: st });
+    return st;
   }
 
   async park(profile: Profile, signal: QuotaSignal): Promise<void> {

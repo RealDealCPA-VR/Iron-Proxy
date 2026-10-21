@@ -130,6 +130,41 @@ export type ProfileStatus =
   | 'disabled' // user switched it off
   | 'unknown'; // never checked
 
+/**
+ * Where an account's plan was read: `cli-status` is the vendor CLI's own status
+ * command (Claude Code's `claude auth status` reports `subscriptionType`),
+ * `rate-limits` a rate-limit snapshot a host reported (Codex's `planType`).
+ */
+export type PlanSource = 'cli-status' | 'rate-limits';
+
+/**
+ * Where an account window was read: `headers` are Anthropic's
+ * `anthropic-ratelimit-unified-*` response headers a host forwarded, `rate-limits`
+ * a Codex rate-limit snapshot a host reported.
+ */
+export type AccountWindowSource = 'headers' | 'rate-limits';
+
+/**
+ * One usage window of a subscription account, as the vendor last reported it.
+ * Never estimated: a window Iron-Proxy could not read is absent.
+ */
+export interface AccountWindow {
+  /**
+   * Which window. Claude: `5h` / `7d` (the `anthropic-ratelimit-unified-5h-*` and
+   * `-7d-*` headers). Codex: `primary` / `secondary` (the snapshot's own slots).
+   */
+  kind: string;
+  /** Share of the window used, in percent (0..150; above 100 only when the vendor says so). */
+  usedPercent: number;
+  /** Length of the window in minutes, when known. */
+  windowMins?: number;
+  /** When the window resets, ISO 8601, when known. */
+  resetsAt?: string;
+  source: AccountWindowSource;
+  /** When the reading was taken, ISO 8601. */
+  at: string;
+}
+
 /** Runtime state, persisted separately from the profile so it can be reset freely. */
 export interface ProfileState {
   profileId: string;
@@ -141,6 +176,19 @@ export interface ProfileState {
   lastError?: string;
   /** Total requests served since the state was created. */
   served: number;
+  /**
+   * The account's subscription plan in the vendor's own word (`max`, `pro`,
+   * `plus`, `team`, …), lowercase. Absent until a source said it.
+   */
+  plan?: string;
+  planSource?: PlanSource;
+  /** When the plan was read, ISO 8601. */
+  planAt?: string;
+  /**
+   * The latest reading of each usage window, one per `kind`. A window whose
+   * reset has passed is dropped (its percentage describes a window that is over).
+   */
+  windows?: AccountWindow[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -200,6 +248,28 @@ export interface Usage {
 /* External executors (IronProxy.reportSignal / reportFinished)        */
 /* ------------------------------------------------------------------ */
 
+/** One window of a Codex rate-limit snapshot (`RateLimitWindow`). */
+export interface ExternalRateLimitWindow {
+  /** Percent of the window used. */
+  usedPercent: number;
+  windowDurationMins?: number | null;
+  /** When the window resets, unix seconds. */
+  resetsAt?: number | null;
+}
+
+/**
+ * A Codex account rate-limit snapshot (`RateLimitSnapshot` from `codex app-server`'s
+ * `account/rateLimits/read` or `account/rateLimits/updated`), as a host reports it.
+ * Only these fields are read; any other key (credits, limitId, …) is ignored.
+ */
+export interface ExternalRateLimits {
+  planType?: string | null;
+  primary?: ExternalRateLimitWindow | null;
+  secondary?: ExternalRateLimitWindow | null;
+  /** When the host read the snapshot, unix seconds. Defaults to when Iron-Proxy received it. */
+  observedAt?: number;
+}
+
 /** What a host that ran the vendor CLI itself saw when the attempt failed. */
 export interface ExternalSignalInput {
   /** HTTP status of the failed call, when there was one (then `detectFromHttp` classifies). */
@@ -208,6 +278,8 @@ export interface ExternalSignalInput {
   headers?: Record<string, string>;
   /** The error body, or what the CLI printed (classified by `detectFromCliOutput` without `status`). */
   text?: string;
+  /** The account's rate-limit snapshot, when the vendor CLI reported one (Codex). */
+  rateLimits?: ExternalRateLimits | null;
 }
 
 export type ExternalSignalResult =
@@ -218,6 +290,13 @@ export interface ExternalFinishedInput {
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number };
   durationMs?: number;
   model?: string;
+  /**
+   * Response headers of the call, lowercase names. Only the
+   * `anthropic-ratelimit-unified-*` usage-window headers are read (Claude accounts).
+   */
+  headers?: Record<string, string>;
+  /** The account's rate-limit snapshot, when the vendor CLI reported one (Codex). */
+  rateLimits?: ExternalRateLimits | null;
 }
 
 export interface UnifiedResponse {
