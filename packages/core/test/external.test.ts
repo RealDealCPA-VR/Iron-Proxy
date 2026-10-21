@@ -26,13 +26,16 @@ let events: IronEvent[];
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'iron-external-'));
   now = Date.parse('2026-10-03T12:00:00Z');
+  // The usage store prunes by age on the same fixed clock: on the system clock,
+  // records dated 2026-10-03 aged out 14 days later and the history read empty.
+  const clock = { now: () => now };
   iron = createIronProxy({
     dataDir: dir,
     profiles: new MemoryProfileStore(),
     states: new MemoryStateStore(),
-    usage: new MemoryUsageStore(),
+    usage: new MemoryUsageStore({ clock }),
     vault: new MemoryVault(),
-    clock: { now: () => now },
+    clock,
   });
   events = [];
   iron.events.onAny((e) => events.push(e));
