@@ -374,6 +374,11 @@ describe('a window whose reset has passed', () => {
       '7d',
     ]);
     expect((await iron.states.get('a'))?.windows?.map((w) => w.kind)).toEqual(['7d']);
+    // Once every window is over, the key goes (an empty list would read as "known: nothing").
+    now += 86_400_000;
+    const over = await iron.reportFinished('a', { durationMs: 1 });
+    expect(over).not.toHaveProperty('windows');
+    expect(await iron.states.get('a')).not.toHaveProperty('windows');
   });
 });
 
