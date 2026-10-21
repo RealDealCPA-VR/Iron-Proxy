@@ -558,4 +558,38 @@ describe('signing out forgets the plan and windows', () => {
     for (const k of ['plan', 'planSource', 'planAt', 'windows'] as const)
       expect(st[k]).toBeUndefined();
   });
+
+  it('a sign-in a refresh finds (done outside Iron-Proxy, in a host’s own terminal) drops them too (review)', async () => {
+    const learned = {
+      headers: claudeHeaders('0.5', '0.2', now + 60_000, now + 86_400_000),
+      rateLimits: { planType: 'max' },
+    };
+    // `pro`: signed in again with a Pro subscription. `none`: with no subscription.
+    await put('pro', { plan: 'pro' });
+    await put('none');
+    for (const id of ['pro', 'none']) {
+      await iron.reportFinished(id, learned);
+      const st = (await iron.states.get(id))!;
+      await iron.states.put({ ...st, status: 'unauthenticated' }); // the old login ran out
+    }
+    now += 1_000;
+    const states = await iron.refreshStatus();
+    const byId = Object.fromEntries(states.map((s) => [s.profileId, s]));
+    expect(byId.pro).toMatchObject({ status: 'ready', plan: 'pro', planSource: 'cli-status' });
+    expect(byId.pro?.windows).toBeUndefined();
+    expect(byId.none).toMatchObject({ status: 'ready' });
+    for (const k of ['plan', 'planSource', 'planAt', 'windows'] as const)
+      expect(byId.none?.[k], k).toBeUndefined();
+  });
+
+  it('a refresh that finds an account still signed in keeps what was learned (review)', async () => {
+    await put('a', { plan: 'max' });
+    await iron.reportFinished('a', {
+      headers: claudeHeaders('0.5', '0.2', now + 60_000, now + 86_400_000),
+    });
+    const st = (await iron.states.get('a'))!;
+    await iron.states.put({ ...st, status: 'ready' });
+    const [after] = await iron.refreshStatus('a');
+    expect(after).toMatchObject({ status: 'ready', plan: 'max', windows: [{}, {}] });
+  });
 });

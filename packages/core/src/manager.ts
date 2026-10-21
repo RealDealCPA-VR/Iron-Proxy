@@ -659,6 +659,10 @@ export class IronProxy {
           // the copy read before the check would silently undo it.
           st = await this.router.state(p.id);
           if (st.status !== 'parked' && st.status !== 'active') {
+            // Signed in again outside Iron-Proxy (a host's own terminal runs the
+            // login command): like a sign-in through `login`, it may be another
+            // subscription, so what was known about the old one goes.
+            if (st.status === 'unauthenticated' && result === 'ok') forgetLimits(st);
             st.status =
               result === 'unauthenticated'
                 ? 'unauthenticated'
