@@ -129,7 +129,7 @@ function resetFromHeaders(
         headers('anthropic-ratelimit-input-tokens-reset'),
         headers('anthropic-ratelimit-output-tokens-reset'),
         headers('anthropic-ratelimit-tokens-reset'),
-        headers('anthropic-ratelimit-unified-reset'),
+        unifiedLimitReached(headers) ? headers('anthropic-ratelimit-unified-reset') : undefined,
       ];
       let best: number | undefined;
       for (const c of candidates) {
@@ -150,6 +150,23 @@ function resetFromHeaders(
     case 'google':
       return undefined; // Google puts retryDelay in the body, handled below.
   }
+}
+
+/**
+ * Whether `anthropic-ratelimit-unified-reset` says when the account is usable
+ * again. Anthropic sends it on every subscription response, an `allowed` one
+ * included (then it is only the end of the current window, hours away), beside
+ * `anthropic-ratelimit-unified-status`. So when that status is present the reset
+ * counts only while it is `rejected` and no overage is serving: the condition
+ * under which Claude Code 2.1.306 itself turns the reset into a retry-after (its
+ * `updateRetryAfter`); any other 429 keeps its own retry-after. A host that
+ * forwards the reset without the status is taken at its word, as before.
+ */
+function unifiedLimitReached(headers: HeaderGetter): boolean {
+  const status = headers('anthropic-ratelimit-unified-status')?.trim().toLowerCase();
+  if (!status) return true;
+  const overage = headers('anthropic-ratelimit-unified-overage-status')?.trim().toLowerCase();
+  return status === 'rejected' && (!overage || overage === 'rejected');
 }
 
 function resetFromBody(body: string, now: number): string | undefined {

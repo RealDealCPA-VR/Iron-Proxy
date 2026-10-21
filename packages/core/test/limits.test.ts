@@ -129,6 +129,66 @@ describe('detectFromHttp reads the subscription reset as unix seconds', () => {
     );
     expect(sig?.resetAt).toBe(reset);
   });
+
+  it('reads the unified reset only while the subscription limit itself refused the call (review)', () => {
+    // Anthropic sends unified-reset on every subscription response (the end of the
+    // current window, hours away). A 429 the subscription limit did not cause keeps
+    // its own retry-after: parking until the window ends would take a working
+    // account out for hours.
+    const windowEnd = String(secs(now + 4 * 3_600_000));
+    const body = '{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}';
+    const cases: Array<[string, Record<string, string>]> = [
+      ['allowed', { 'anthropic-ratelimit-unified-status': 'allowed' }],
+      ['allowed_warning', { 'anthropic-ratelimit-unified-status': 'allowed_warning' }],
+      [
+        'rejected, overage serving',
+        {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-overage-status': 'allowed',
+        },
+      ],
+    ];
+    for (const [name, extra] of cases) {
+      const sig = detectFromHttp(
+        'anthropic',
+        429,
+        headersFrom({
+          ...extra,
+          'anthropic-ratelimit-unified-reset': windowEnd,
+          'retry-after': '30',
+        }),
+        body,
+        now,
+      );
+      expect(sig?.resetAt, name).toBeUndefined();
+      expect(sig?.retryAfterMs, name).toBe(30_000);
+    }
+    const counted: Array<[string, Record<string, string>]> = [
+      [
+        'rejected, overage rejected too',
+        {
+          'anthropic-ratelimit-unified-status': 'Rejected',
+          'anthropic-ratelimit-unified-overage-status': 'rejected',
+        },
+      ],
+      // A host that forwarded the reset without its status is taken at its word.
+      ['no status', {}],
+    ];
+    for (const [name, extra] of counted) {
+      const sig = detectFromHttp(
+        'anthropic',
+        429,
+        headersFrom({
+          ...extra,
+          'anthropic-ratelimit-unified-reset': windowEnd,
+          'retry-after': '30',
+        }),
+        body,
+        now,
+      );
+      expect(sig?.resetAt, name).toBe(iso(Number(windowEnd) * 1000));
+    }
+  });
 });
 
 describe('limitsFromRateLimits (Codex)', () => {

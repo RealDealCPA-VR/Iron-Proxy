@@ -312,6 +312,32 @@ describe('reportSignal learns usage windows too', () => {
     });
   });
 
+  it('Claude: a 429 the subscription limit did not cause parks for its retry-after, not until the window ends (review)', async () => {
+    await put('a');
+    const windowEnd = now + 4 * 3_600_000;
+    const r = await iron.reportSignal('a', {
+      status: 429,
+      // What a host forwards from a subscription response: the status says allowed,
+      // and unified-reset is only the end of the current window.
+      headers: {
+        ...claudeHeaders('0.4', '0.2', windowEnd, now + 86_400_000),
+        'anthropic-ratelimit-unified-reset': String(secs(windowEnd)),
+        'retry-after': '20',
+      },
+      text: '{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}',
+    });
+    if (!r.parked) throw new Error('expected a park');
+    expect(r.signal.resetAt).toBeUndefined();
+    expect(r.state).toMatchObject({
+      status: 'parked',
+      parkedUntil: iso(now + 20_000),
+      windows: [
+        { kind: '5h', usedPercent: 40 },
+        { kind: '7d', usedPercent: 20 },
+      ],
+    });
+  });
+
   it('rejects a rateLimits that is not an object', async () => {
     await put('o', { provider: 'openai' });
     await expect(
