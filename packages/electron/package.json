@@ -1,6 +1,6 @@
 {
   "name": "@iron-proxy/electron",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Electron integration for Iron-Proxy: safeStorage-protected vault key, one IPC dispatcher for the main process, a preload bridge exposing window.ironProxy, and a helper that opens a vendor CLI login in a terminal window.",
   "license": "MIT",
   "type": "module",
